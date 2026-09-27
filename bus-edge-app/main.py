@@ -30,10 +30,12 @@ import time
 import datetime
 import cv2
 import numpy as np
+import threading
 
 import db
 from state_machine import Detection, Leg, Direction, Outcome, process_detection
 from matcher import match_against_roster, MockBackend
+from sync_client import SyncClient
 
 PROCESS_EVERY_N_FRAMES = 3   # skip frames between recognition passes - keeps video smooth
 DETECTION_SCALE = 0.5        # detect on a half-size copy. Combined with the 640x480
@@ -185,11 +187,19 @@ def main():
     parser.add_argument("--bus-id", required=True)
     parser.add_argument("--leg", default="auto", choices=["AM", "PM", "auto"])
     parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--backend-url", default=None, help="Optional: backend URL for auto-sync")
     args = parser.parse_args()
 
     db.init_db()
     backend = get_backend()
 
+    # Start background sync if backend URL provided
+    sync_client = None
+    if args.backend_url:
+        sync_client = SyncClient(args.backend_url, args.bus_id)
+        sync_client.start_background(interval=30)
+        print(f"[SYNC] Background sync started: {args.backend_url}")
+    
     # Explicitly force the V4L2 backend instead of letting OpenCV pick GStreamer -
     # on Raspberry Pi OS, GStreamer often silently ignores cap.set() calls for
     # FOURCC/resolution/buffer size (you'll see "unhandled property" warnings and
@@ -281,6 +291,8 @@ def main():
     finally:
         cap.release()
         cv2.destroyAllWindows()
+        if sync_client:
+            sync_client.running = False
 
 
 if __name__ == "__main__":
