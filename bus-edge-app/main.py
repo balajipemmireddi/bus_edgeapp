@@ -164,11 +164,15 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
 
         if student and not track.fired_this_visit:
             direction = track.direction()
+            current_status = db.get_status(child_id)
             detection = Detection(child_id, result.confidence, direction, gps=None)
             outcome = process_detection(detection, leg, student, stop_coords_lookup={})
             
-            print(f"[STATE] {child_id}: direction={direction}, outcome={outcome}, status={db.get_status(child_id)}")
-
+            leg_name = current_leg(args.leg)
+            print(f"\n[STATE_DEBUG] {child_id} ({label})")
+            print(f"  Leg: {leg_name.value} | Direction: {direction.value} | Status: {current_status}")
+            print(f"  Confidence: {result.confidence:.3f} | Outcome: {outcome.value}")
+            
             if outcome in (Outcome.FIRE_PICKED_UP, Outcome.FIRE_DROPPED, Outcome.FIRE_EXIT_UNEXPECTED):
                 event_type = {
                     Outcome.FIRE_PICKED_UP: "PICKED_UP",
@@ -179,12 +183,12 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
                     child_id=child_id, event_type=event_type, confidence=result.confidence,
                     photo_path="", gps=None, bus_id=bus_id,
                 )
-                print(f"[EVENT] {label}: {event_type} (confidence={result.confidence:.3f})")
+                print(f"  ✓ [EVENT FIRED] {event_type}")
                 label = f"{label}: {event_type}"
                 color = (0, 220, 0)
                 track.fired_this_visit = True  # don't re-fire every processed frame while they linger
             else:
-                print(f"[STATE] No event fired - outcome was {outcome}")
+                print(f"  ✗ No event - blocked by state machine logic")
 
         draw_items.append(((top, right, bottom, left), label, color))
 
