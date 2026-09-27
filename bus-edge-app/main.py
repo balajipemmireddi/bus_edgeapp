@@ -133,6 +133,10 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
         print(f"[ERROR] detection failed: {e}")
         return []
 
+    if not all_faces:
+        # Silently skip frames with no faces
+        return []
+
     draw_items = []
     scale_back = 1.0 / DETECTION_SCALE
 
@@ -141,6 +145,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
         box_size = (right - left) * (bottom - top)
 
         result = match_against_roster(encoding, roster, backend)
+        print(f"[MATCH] confidence={result.confidence:.3f}, child_id={result.child_id}, ambiguous={result.is_ambiguous}")
 
         if result.child_id is None:
             draw_items.append(((top, right, bottom, left), "Unknown", (0, 0, 200)))
@@ -161,6 +166,8 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
             direction = track.direction()
             detection = Detection(child_id, result.confidence, direction, gps=None)
             outcome = process_detection(detection, leg, student, stop_coords_lookup={})
+            
+            print(f"[STATE] {child_id}: direction={direction}, outcome={outcome}, status={db.get_status(child_id)}")
 
             if outcome in (Outcome.FIRE_PICKED_UP, Outcome.FIRE_DROPPED, Outcome.FIRE_EXIT_UNEXPECTED):
                 event_type = {
@@ -176,6 +183,8 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
                 label = f"{label}: {event_type}"
                 color = (0, 220, 0)
                 track.fired_this_visit = True  # don't re-fire every processed frame while they linger
+            else:
+                print(f"[STATE] No event fired - outcome was {outcome}")
 
         draw_items.append(((top, right, bottom, left), label, color))
 
@@ -188,8 +197,26 @@ def main():
     parser.add_argument("--leg", default="auto", choices=["AM", "PM", "auto"])
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--backend-url", default=None, help="Optional: backend URL for auto-sync")
-    parser.add_argument("--headless", action="store_true", default=False, help="Run without display window (just process frames)")
+    parser.add_argument("--display", type=str, default=None, help="DISPLAY variable (e.g. :0). Auto-detect if not set")
     args = parser.parse_args()
+
+    # Set up display if on Pi with physical screen
+    import os
+    if args.display:
+        os.environ["DISPLAY"] = args.display
+        print(f"[DISPLAY] Set DISPLAY={args.display}")
+    elif "DISPLAY" not in os.environ:
+        # Try auto-detect common values on Pi
+        for display_val in [":0", ":1"]:
+            try:
+                test_env = os.environ.copy()
+                test_env["DISPLAY"] = display_val
+                # We'll try to use it; if it fails, we'll fall back
+                os.environ["DISPLAY"] = display_val
+                print(f"[DISPLAY] Auto-detected DISPLAY={display_val}")
+                break
+            except:
+                pass
 
     db.init_db()
     backend = get_backend()
@@ -221,19 +248,18 @@ def main():
     fourcc_str = "".join([chr((actual_fourcc >> 8 * i) & 0xFF) for i in range(4)])
     print(f"[CAMERA] resolution={int(actual_w)}x{int(actual_h)} fourcc={fourcc_str}")
 
-    # Only create display window if not in headless mode
+    # Try to create display window - if DISPLAY is not set or invalid, it will just skip
     window_name = "Bus Edge App"
-    if not args.headless:
-        try:
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-            cv2.moveWindow(window_name, 0, 0)
-            has_display = True
-        except Exception as e:
-            print(f"[WARN] Could not create display window: {e}. Running headless.")
-            has_display = False
-    else:
+    has_display = False
+    try:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        cv2.moveWindow(window_name, 0, 0)
+        has_display = True
+        print(f"[DISPLAY] Window created successfully")
+    except Exception as e:
+        print(f"[WARN] Could not create display window: {e}")
+        print(f"[INFO] Running without display - events still sync to backend")
         has_display = False
-        print("[HEADLESS MODE] Processing frames without display window")
 
     tracks: dict[str, ChildTrack] = {}
     last_draw_items = []
@@ -243,6 +269,7 @@ def main():
     fps = 0.0
 
     print(f"Edge app running for {args.bus_id} (continuous mode). Press 'q' to stop.")
+    print(f"[DEBUG] CONFIDENCE_THRESHOLD = {0.45} (from matcher.py)")
     try:
         while True:
             ret, frame = cap.read()
@@ -252,12 +279,16 @@ def main():
 
             if frame_count % PROCESS_EVERY_N_FRAMES == 0:
                 roster = db.load_roster()
+                if not roster:
+                    print(f"[WARN] Empty roster - no students to match. Did roster sync succeed?")
                 if roster:
                     t0 = time.time()
                     last_draw_items = process_frame(frame, backend, roster, args.bus_id, current_leg(args.leg), tracks)
                     dt = time.time() - t0
                     if dt > 0.5:
                         print(f"[TIMING] recognition pass took {dt:.2f}s")
+                    if last_draw_items:
+                        print(f"[DETECTION] Found {len(last_draw_items)} face(s) in frame {frame_count}")
                 for cid in list(tracks.keys()):
                     if tracks[cid].is_stale():
                         del tracks[cid]
@@ -282,17 +313,18 @@ def main():
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
             else:
-                # In headless mode, just log events and don't display
-                for (top, right, bottom, left), label, color in last_draw_items:
-                    print(f"[DETECTION] {label}")
-                time.sleep(0.033)  # ~30fps without display overhead
+                # No display - just sleep a bit so we don't spin CPU
+                time.sleep(0.033)  # ~30fps even without display
 
     except KeyboardInterrupt:
         pass
     finally:
         cap.release()
         if has_display:
-            cv2.destroyAllWindows()
+            try:
+                cv2.destroyAllWindows()
+            except:
+                pass
         if sync_client:
             sync_client.running = False
 

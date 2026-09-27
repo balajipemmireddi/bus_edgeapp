@@ -19,12 +19,15 @@ echo ""
 echo "============================================"
 echo "  Starting main.py (camera + recognition + auto-sync)"
 echo "  Backend target: $BACKEND_URL"
-echo "  Mode: Headless (no display, processes frames silently)"
-echo "  Check dashboard for live events:"
+echo "  If there's a display connected, video will appear below."
+echo "  If not, check dashboard for live events:"
 echo "    http://$BACKEND_IP:8000/dashboard"
 echo "============================================"
 
-python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL" --headless
+# Set DISPLAY to :0 if running on a physical Pi with a monitor/HDMI
+export DISPLAY=:0
+
+python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL" --display :0
 
 # When main.py exits (Ctrl+C or window closed), also stop the face processor
 echo "Stopping face_processor.py (pid $FP_PID)..."
