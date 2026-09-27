@@ -6,9 +6,6 @@ BACKEND_IP="192.168.29.83"
 BACKEND_URL="http://${BACKEND_IP}:8000"
 BUS_ID="bus_14"
 
-# Force DISPLAY to :0 for the physical display connected to Pi
-export DISPLAY=:0
-
 echo "============================================"
 echo "  Starting face_processor.py in the background"
 echo "  (this is what actually runs dlib - the backend delegates to it)"
@@ -22,10 +19,12 @@ echo ""
 echo "============================================"
 echo "  Starting main.py (camera + recognition + auto-sync)"
 echo "  Backend target: $BACKEND_URL"
-echo "  Display: $DISPLAY (video window will show on your Pi screen)"
+echo "  Mode: Headless (no display, processes frames silently)"
+echo "  Check dashboard for live events:"
+echo "    http://$BACKEND_IP:8000/dashboard"
 echo "============================================"
 
-DISPLAY=:0 python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL"
+python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL" --headless
 
 # When main.py exits (Ctrl+C or window closed), also stop the face processor
 echo "Stopping face_processor.py (pid $FP_PID)..."

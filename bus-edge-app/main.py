@@ -188,6 +188,7 @@ def main():
     parser.add_argument("--leg", default="auto", choices=["AM", "PM", "auto"])
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--backend-url", default=None, help="Optional: backend URL for auto-sync")
+    parser.add_argument("--headless", action="store_true", default=False, help="Run without display window (just process frames)")
     args = parser.parse_args()
 
     db.init_db()
@@ -200,45 +201,39 @@ def main():
         sync_client.start_background(interval=30)
         print(f"[SYNC] Background sync started: {args.backend_url}")
     
-    # Explicitly force the V4L2 backend instead of letting OpenCV pick GStreamer -
-    # on Raspberry Pi OS, GStreamer often silently ignores cap.set() calls for
-    # FOURCC/resolution/buffer size (you'll see "unhandled property" warnings and
-    # none of the settings actually apply), while V4L2 respects them properly.
+    # Explicitly force the V4L2 backend instead of letting OpenCV pick GStreamer
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)
     if not cap.isOpened():
-        print("[WARN] V4L2 backend failed to open camera - falling back to default backend "
-              "(FOURCC/resolution settings may not take effect on this system)")
+        print("[WARN] V4L2 backend failed to open camera - falling back to default backend")
         cap = cv2.VideoCapture(args.camera_index)
     if not cap.isOpened():
         print(f"ERROR: could not open camera at index {args.camera_index}")
         return
 
-    # USB webcams (unlike the Pi's own CSI camera) very often default to sending
-    # RAW uncompressed frames over USB, which is slow to transfer and makes every
-    # cap.read() call sluggish before detection even starts. Forcing MJPEG makes
-    # the camera compress frames itself before sending - much less USB bandwidth
-    # needed, which is very likely the biggest single lever here.
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    # Smaller base resolution - we downscale further for detection anyway
-    # (DETECTION_SCALE), so capturing at 1280x720 was pure overhead.
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    # Keep only the newest frame instead of letting OpenCV queue several -
-    # without this, you can end up processing a frame that's already stale by
-    # the time you get to it, adding perceived lag on top of real processing time.
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
     actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     fourcc_str = "".join([chr((actual_fourcc >> 8 * i) & 0xFF) for i in range(4)])
-    print(f"[CAMERA] resolution={int(actual_w)}x{int(actual_h)} fourcc={fourcc_str} "
-          f"(requested MJPG - if this doesn't say MJPG, your camera may not support it "
-          f"and will fall back to a slower raw format)")
+    print(f"[CAMERA] resolution={int(actual_w)}x{int(actual_h)} fourcc={fourcc_str}")
 
+    # Only create display window if not in headless mode
     window_name = "Bus Edge App"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.moveWindow(window_name, 0, 0)
+    if not args.headless:
+        try:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.moveWindow(window_name, 0, 0)
+            has_display = True
+        except Exception as e:
+            print(f"[WARN] Could not create display window: {e}. Running headless.")
+            has_display = False
+    else:
+        has_display = False
+        print("[HEADLESS MODE] Processing frames without display window")
 
     tracks: dict[str, ChildTrack] = {}
     last_draw_items = []
@@ -261,36 +256,43 @@ def main():
                     t0 = time.time()
                     last_draw_items = process_frame(frame, backend, roster, args.bus_id, current_leg(args.leg), tracks)
                     dt = time.time() - t0
-                    if dt > 0.5:  # only log when it's slow enough to matter, avoids noisy output
+                    if dt > 0.5:
                         print(f"[TIMING] recognition pass took {dt:.2f}s")
-                # Forget tracks we haven't seen in a while (person left frame)
                 for cid in list(tracks.keys()):
                     if tracks[cid].is_stale():
                         del tracks[cid]
 
-            display = frame.copy()
-            for (top, right, bottom, left), label, color in last_draw_items:
-                display = draw_face_box(display, (top, right, bottom, left), label, color)
-            display = fit_to_screen(display)
-            display = draw_top_bar(display, f"{args.bus_id} | {current_leg(args.leg).value} | live", (60, 60, 60))
+            if has_display:
+                display = frame.copy()
+                for (top, right, bottom, left), label, color in last_draw_items:
+                    display = draw_face_box(display, (top, right, bottom, left), label, color)
+                display = fit_to_screen(display)
+                display = draw_top_bar(display, f"{args.bus_id} | {current_leg(args.leg).value} | live", (60, 60, 60))
 
-            fps_frame_count += 1
-            elapsed = time.time() - fps_start_time
-            if elapsed > 1:
-                fps = fps_frame_count / elapsed
-                fps_frame_count = 0
-                fps_start_time = time.time()
-            cv2.putText(display, f"FPS: {fps:.1f}", (display.shape[1] - 110, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                fps_frame_count += 1
+                elapsed = time.time() - fps_start_time
+                if elapsed > 1:
+                    fps = fps_frame_count / elapsed
+                    fps_frame_count = 0
+                    fps_start_time = time.time()
+                cv2.putText(display, f"FPS: {fps:.1f}", (display.shape[1] - 110, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            cv2.imshow(window_name, display)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+                cv2.imshow(window_name, display)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            else:
+                # In headless mode, just log events and don't display
+                for (top, right, bottom, left), label, color in last_draw_items:
+                    print(f"[DETECTION] {label}")
+                time.sleep(0.033)  # ~30fps without display overhead
+
     except KeyboardInterrupt:
         pass
     finally:
         cap.release()
-        cv2.destroyAllWindows()
+        if has_display:
+            cv2.destroyAllWindows()
         if sync_client:
             sync_client.running = False
 
