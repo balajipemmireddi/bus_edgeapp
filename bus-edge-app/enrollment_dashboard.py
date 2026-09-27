@@ -1,5 +1,6 @@
 """
 Enrollment dashboard - runs on the Pi (port 8090 by default).
+Uses the same quality checks and encoding logic from enroll_student.py.
 Staff opens this from any device on the network, uploads photos.
 Pi validates + encodes locally, then pushes to backend.
 
@@ -11,12 +12,9 @@ Then open: http://<Pi-IP>:8090 from any browser on the network.
 
 import argparse
 import base64
-import io
-import json
 import os
 import cv2
 import numpy as np
-from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -24,11 +22,11 @@ import requests
 import uvicorn
 
 import db
-import face_processor
-
-BLUR_THRESHOLD = float(os.environ.get("BLUR_THRESHOLD", 15.0))
+from enroll_student import quality_check, get_encoding_for_image, BLUR_THRESHOLD
+from matcher import RealBackend
 
 app = FastAPI(title="Student Enrollment Dashboard")
+
 
 class EnrollmentRequest(BaseModel):
     child_id: str
@@ -41,6 +39,7 @@ class EnrollmentRequest(BaseModel):
 
 
 def base64_to_cv2(b64_str: str):
+    """Decode base64 string to OpenCV image."""
     try:
         img_data = base64.b64decode(b64_str)
         arr = np.frombuffer(img_data, np.uint8)
@@ -49,29 +48,17 @@ def base64_to_cv2(b64_str: str):
         return None
 
 
-def quality_check(image) -> tuple[bool, str]:
-    """Check if image is suitable for enrollment."""
-    if image is None:
-        return False, "Could not decode image"
-    
-    h, w = image.shape[:2]
-    if w < 100 or h < 100:
-        return False, f"Resolution too low ({w}x{h})"
-    
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-    
-    if sharpness < BLUR_THRESHOLD:
-        return False, f"Too blurry (sharpness={sharpness:.1f}, need >{BLUR_THRESHOLD})"
-    
-    return True, f"OK (sharpness={sharpness:.1f})"
-
-
 @app.post("/enroll")
-def enroll(req: EnrollmentRequest, backend_url: str):
-    """Enroll a student with photos."""
+async def enroll(req: EnrollmentRequest, backend_url: str):
+    """Enroll a student with photos - uses same logic as enroll_student.py CLI."""
     if not req.photos:
         raise HTTPException(400, "No photos provided")
+    
+    # Load backend for face encoding
+    try:
+        backend = RealBackend()
+    except ImportError:
+        raise HTTPException(500, "face_recognition not installed")
     
     good_encodings = []
     rejections = []
@@ -80,59 +67,62 @@ def enroll(req: EnrollmentRequest, backend_url: str):
     
     for i, b64_photo in enumerate(req.photos):
         image = base64_to_cv2(b64_photo)
+        if image is None:
+            rejections.append(f"Photo {i+1}: Could not decode")
+            print(f"  Photo {i+1}: REJECTED - Could not decode")
+            continue
+        
+        # Quality check (same as enroll_student.py)
         ok, msg = quality_check(image)
-        
-        print(f"  Photo {i+1}: {msg}")
-        
         if not ok:
             rejections.append(f"Photo {i+1}: {msg}")
+            print(f"  Photo {i+1}: REJECTED - {msg}")
             continue
         
-        # Get face encoding
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        import face_recognition
-        locations = face_recognition.face_locations(rgb)
-        
-        if len(locations) != 1:
-            rejections.append(f"Photo {i+1}: Expected 1 face, found {len(locations)}")
+        # Get encoding (same as enroll_student.py)
+        encoding, err = get_encoding_for_image(image, backend)
+        if err:
+            rejections.append(f"Photo {i+1}: {err}")
+            print(f"  Photo {i+1}: REJECTED - {err}")
             continue
         
-        encodings = face_recognition.face_encodings(rgb, known_face_locations=locations)
-        if not encodings:
-            rejections.append(f"Photo {i+1}: Encoding failed")
-            continue
-        
-        good_encodings.append(encodings[0].tolist())
-        print(f"    ✓ Encoding generated")
+        good_encodings.append(encoding.tolist())
+        print(f"  Photo {i+1}: accepted")
     
     if not good_encodings:
         msg = f"No usable photos. {'; '.join(rejections)}"
         print(f"  [FAILED] {msg}")
-        return {"status": "error", "message": msg}
+        raise HTTPException(400, msg)
+    
+    # Create student record
+    new_student = {
+        "child_id": req.child_id,
+        "name": req.name,
+        "encodings": good_encodings,
+        "assigned_bus_id": req.bus_id,
+        "pickup_stop_id": req.pickup_stop_id,
+        "drop_stop_id": req.drop_stop_id,
+        "twin_group": req.twin_group,
+    }
+    
+    # Save locally first
+    db.init_db()
+    roster = db.load_roster()
+    roster = [s for s in roster if s["child_id"] != req.child_id]  # replace if re-enrolling
+    roster.append(new_student)
+    db.replace_roster(roster)
     
     # Push to backend
     try:
-        payload = {
-            "child_id": req.child_id,
-            "name": req.name,
-            "encodings": good_encodings,
-            "assigned_bus_id": req.bus_id,
-            "pickup_stop_id": req.pickup_stop_id,
-            "drop_stop_id": req.drop_stop_id,
-            "twin_group": req.twin_group,
-        }
-        
-        resp = requests.post(f"{backend_url}/api/enroll", json=payload, timeout=10)
+        resp = requests.post(f"{backend_url.rstrip('/')}/api/enroll", json=new_student, timeout=10)
         resp.raise_for_status()
-        
-        result = resp.json()
-        msg = f"✓ Enrolled with {len(good_encodings)} encodings"
+        msg = f"✓ Enrolled with {len(good_encodings)} encoding(s)"
         print(f"  [SUCCESS] {msg}")
         return {"status": "success", "message": msg, "child_id": req.child_id}
     except Exception as e:
-        msg = f"Backend error: {str(e)}"
-        print(f"  [FAILED] {msg}")
-        return {"status": "error", "message": msg}
+        msg = f"Saved locally but backend sync failed: {str(e)}"
+        print(f"  [PARTIAL] {msg}")
+        return {"status": "partial", "message": msg, "child_id": req.child_id}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -286,6 +276,11 @@ def dashboard():
       color: #721c24;
       border: 1px solid #f5c6cb;
     }
+    .status.partial {
+      background: #fff3cd;
+      color: #856404;
+      border: 1px solid #ffeaa7;
+    }
     .photo-count {
       color: #666;
       font-size: 12px;
@@ -390,7 +385,7 @@ def dashboard():
       }
       
       submitBtn.disabled = true;
-      statusDiv.classList.remove('show', 'success', 'error');
+      statusDiv.classList.remove('show', 'success', 'error', 'partial');
       
       const payload = {
         child_id: document.getElementById('childId').value,
@@ -411,14 +406,18 @@ def dashboard():
         
         const data = await response.json();
         
-        if (response.ok && data.status === 'success') {
-          showStatus(`✓ ${data.message}`, 'success');
+        if (response.ok) {
+          if (data.status === 'success') {
+            showStatus(`✓ ${data.message}`, 'success');
+          } else if (data.status === 'partial') {
+            showStatus(`⚠️ ${data.message}`, 'partial');
+          }
           form.reset();
           photos = [];
           photoGrid.innerHTML = '';
           photoCount.textContent = '0 photos selected';
         } else {
-          showStatus(`✗ ${data.message}`, 'error');
+          showStatus(`✗ ${data.message || data.detail}`, 'error');
         }
       } catch (err) {
         showStatus(`✗ Network error: ${err.message}`, 'error');
@@ -439,23 +438,31 @@ def dashboard():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend-url", required=True)
-    parser.add_argument("--port", type=int, default=8090)
+    parser.add_argument("--backend-url", required=True, help="Backend URL (e.g., http://192.168.29.83:8000)")
+    parser.add_argument("--port", type=int, default=8090, help="Port to run on (default 8090)")
     args = parser.parse_args()
     
     db.init_db()
     
-    # Make backend_url available to the API
+    # Store backend_url for use in endpoint
     app.backend_url = args.backend_url
     
-    # Wrap the enroll endpoint to inject backend_url
-    original_enroll = app.routes[1].endpoint
-    async def enroll_with_url(req: EnrollmentRequest):
-        return original_enroll(req, args.backend_url)
+    # Update the enroll endpoint to use the backend_url
+    original_enroll = enroll
+    async def enroll_wrapper(req: EnrollmentRequest):
+        return await original_enroll(req, args.backend_url)
     
-    print(f"Enrollment dashboard running.")
-    print(f"Open http://<this-device-IP>:{args.port} from any device on the network.")
+    # Replace the route
+    for i, route in enumerate(app.routes):
+        if hasattr(route, 'path') and route.path == '/enroll':
+            app.routes[i].endpoint = enroll_wrapper
+            break
+    
+    print(f"\n🎓 Enrollment Dashboard")
+    print(f"Open http://<this-device-IP>:{args.port} from any browser on the network")
     print(f"Backend: {args.backend_url}")
+    print(f"Blur threshold: {BLUR_THRESHOLD}")
+    print()
     
     uvicorn.run(app, host="0.0.0.0", port=args.port)
 
