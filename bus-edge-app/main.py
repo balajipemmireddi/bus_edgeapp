@@ -52,10 +52,15 @@ TRACK_FORGET_SEC = 2.0       # if a child hasn't been seen for this long, forget
 def get_backend():
     try:
         from matcher import RealBackend
-        return RealBackend()
-    except ImportError:
-        print("[WARN] face_recognition not installed - running with MockBackend "
-              "(matching will not work on real faces). Install on the Pi via piwheels.")
+        backend = RealBackend()
+        print("[BACKEND] ✓ Using RealBackend (face_recognition with dlib)")
+        return backend
+    except ImportError as e:
+        print(f"[BACKEND] ✗ face_recognition not installed: {e}")
+        print("[BACKEND] Running with MockBackend (no face detection - for testing only)")
+        print("[BACKEND] To enable detection, install on Pi:")
+        print("[BACKEND]   pip install face-recognition --extra-index-url https://www.piwheels.org/simple")
+        from matcher import MockBackend
         return MockBackend()
 
 
@@ -130,11 +135,14 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
     try:
         all_faces = backend.get_all_encodings(rgb_small)
     except Exception as e:
-        print(f"[ERROR] detection failed: {e}")
+        print(f"[ERROR] Face detection crashed: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
+    # Log every detection attempt (even if 0 faces found)
     if not all_faces:
-        # Silently skip frames with no faces
+        # Silently skip - don't spam logs on every frame with no faces
         return []
 
     print(f"[DETECTION] Found {len(all_faces)} face(s)")
@@ -284,12 +292,15 @@ def main():
     tracks: dict[str, ChildTrack] = {}
     last_draw_items = []
     frame_count = 0
+    process_count = 0  # Track how many times we run detection
     fps_frame_count = 0
     fps_start_time = time.time()
     fps = 0.0
 
     print(f"Edge app running for {args.bus_id} (continuous mode). Press 'q' to stop.")
     print(f"[DEBUG] CONFIDENCE_THRESHOLD = {0.45} (from matcher.py)")
+    print(f"[DEBUG] PROCESS_EVERY_N_FRAMES = {PROCESS_EVERY_N_FRAMES} (process EVERY frame)")
+    print(f"[DEBUG] Waiting for faces in camera...")
     try:
         while True:
             ret, frame = cap.read()
@@ -298,6 +309,7 @@ def main():
             frame_count += 1
 
             if frame_count % PROCESS_EVERY_N_FRAMES == 0:
+                process_count += 1
                 roster = db.load_roster()
                 if not roster:
                     print(f"[WARN] Empty roster - no students to match. Did roster sync succeed?")
@@ -309,6 +321,9 @@ def main():
                         print(f"[TIMING] recognition pass took {dt:.2f}s")
                     if last_draw_items:
                         print(f"[DETECTION] Found {len(last_draw_items)} face(s) in frame {frame_count}")
+                    elif process_count % 30 == 0:
+                        # Every 30 detection passes with no faces found, print a status
+                        print(f"[DEBUG] Processed {process_count} frames, no faces detected yet (that's OK - keep camera pointed at someone)")
                 for cid in list(tracks.keys()):
                     if tracks[cid].is_stale():
                         del tracks[cid]
