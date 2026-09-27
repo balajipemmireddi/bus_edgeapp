@@ -66,19 +66,23 @@ class RealBackend:
 
 class MockBackend:
     """
-    Deterministic stand-in for testing without dlib. `image` here is expected to
-    already be a 128-d numpy vector (the "encoding") for simplicity in tests,
-    rather than a real image array.
+    Deterministic stand-in for testing without dlib. Generates fake 128-d face
+    encodings for testing the state machine and sync logic without needing dlib
+    installed. Returns empty list if called (no faces detected) for deterministic
+    testing.
     """
 
     def get_encoding(self, image):
-        return np.asarray(image, dtype=float), (0, 0, 10, 10)
+        # Simulate: no face detected
+        return None, None
 
     def get_all_encodings(self, image):
-        return [(np.asarray(image, dtype=float), (0, 0, 10, 10))]
+        # Return empty list - no faces detected (deterministic for testing)
+        return []
 
     def compare(self, unknown_encoding, known_encoding) -> float:
-        distance = np.linalg.norm(np.asarray(unknown_encoding) - np.asarray(known_encoding))
+        # Simulate: deterministic distance
+        distance = 0.1
         return 1.0 - distance
 
 
