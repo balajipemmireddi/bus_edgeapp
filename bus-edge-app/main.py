@@ -37,7 +37,7 @@ from state_machine import Detection, Leg, Direction, Outcome, process_detection
 from matcher import match_against_roster, MockBackend
 from sync_client import SyncClient
 
-PROCESS_EVERY_N_FRAMES = 3   # skip frames between recognition passes - keeps video smooth
+PROCESS_EVERY_N_FRAMES = 1   # Process EVERY frame for real-time detection
 DETECTION_SCALE = 0.5        # detect on a half-size copy. Combined with the 640x480
                               # base capture resolution, this gives a 320x240 image to
                               # the detector - enough detail for dlib's HOG detector to
@@ -137,6 +137,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
         # Silently skip frames with no faces
         return []
 
+    print(f"[DETECTION] Found {len(all_faces)} face(s)")
     draw_items = []
     scale_back = 1.0 / DETECTION_SCALE
 
@@ -168,7 +169,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
             detection = Detection(child_id, result.confidence, direction, gps=None)
             outcome = process_detection(detection, leg, student, stop_coords_lookup={})
             
-            leg_name = current_leg(args.leg)
+            leg_name = current_leg(leg)
             print(f"\n[STATE_DEBUG] {child_id} ({label})")
             print(f"  Leg: {leg_name.value} | Direction: {direction.value} | Status: {current_status}")
             print(f"  Confidence: {result.confidence:.3f} | Outcome: {outcome.value}")
