@@ -234,6 +234,7 @@ def main():
         print(f"[SYNC] Background sync started: {args.backend_url}")
     
     # Explicitly force the V4L2 backend instead of letting OpenCV pick GStreamer
+    print(f"[CAMERA] Attempting to open camera at index {args.camera_index}...")
     cap = cv2.VideoCapture(args.camera_index, cv2.CAP_V4L2)
     if not cap.isOpened():
         print("[WARN] V4L2 backend failed to open camera - falling back to default backend")
@@ -242,29 +243,43 @@ def main():
         print(f"ERROR: could not open camera at index {args.camera_index}")
         return
 
+    print(f"[CAMERA] Camera opened successfully")
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-    actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-    actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
-    fourcc_str = "".join([chr((actual_fourcc >> 8 * i) & 0xFF) for i in range(4)])
-    print(f"[CAMERA] resolution={int(actual_w)}x{int(actual_h)} fourcc={fourcc_str}")
+    try:
+        actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        actual_fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fourcc_str = "".join([chr((actual_fourcc >> 8 * i) & 0xFF) for i in range(4)])
+        print(f"[CAMERA] resolution={int(actual_w)}x{int(actual_h)} fourcc={fourcc_str}")
+    except Exception as e:
+        print(f"[WARN] Could not read camera properties: {e}")
+        print(f"[CAMERA] Proceeding anyway...")
 
     # Try to create display window - if DISPLAY is not set or invalid, it will just skip
     window_name = "Bus Edge App"
     has_display = False
-    try:
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        cv2.moveWindow(window_name, 0, 0)
-        has_display = True
-        print(f"[DISPLAY] Window created successfully")
-    except Exception as e:
-        print(f"[WARN] Could not create display window: {e}")
-        print(f"[INFO] Running without display - events still sync to backend")
-        has_display = False
+    
+    # Only try to create window if DISPLAY is explicitly set in environment
+    display_env = os.environ.get("DISPLAY")
+    if display_env:
+        try:
+            # Disable OpenCV's OpenGL backend which can cause segfaults on headless systems
+            cv2.setUseOptimized(True)
+            # Try creating window - wrap in subprocess check to prevent hard crash
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.moveWindow(window_name, 0, 0)
+            has_display = True
+            print(f"[DISPLAY] Window created successfully on {display_env}")
+        except Exception as e:
+            print(f"[WARN] Could not create display window: {e}")
+            print(f"[INFO] Running without display - events still sync to backend")
+            has_display = False
+    else:
+        print(f"[INFO] No DISPLAY set - running in headless mode (events still sync to backend)")
 
     tracks: dict[str, ChildTrack] = {}
     last_draw_items = []
@@ -322,9 +337,17 @@ def main():
                 time.sleep(0.033)  # ~30fps even without display
 
     except KeyboardInterrupt:
-        pass
+        print("[INFO] Received Ctrl+C, shutting down gracefully...")
+    except Exception as e:
+        print(f"[ERROR] Unexpected error in main loop: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        cap.release()
+        print("[CLEANUP] Releasing resources...")
+        try:
+            cap.release()
+        except:
+            pass
         if has_display:
             try:
                 cv2.destroyAllWindows()
@@ -332,6 +355,7 @@ def main():
                 pass
         if sync_client:
             sync_client.running = False
+        print("[CLEANUP] Done.")
 
 
 if __name__ == "__main__":

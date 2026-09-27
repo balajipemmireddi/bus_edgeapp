@@ -40,16 +40,20 @@ echo ""
 echo "============================================"
 echo "  Starting main.py (camera + recognition + auto-sync)"
 echo "  Backend target: $BACKEND_URL"
-echo "  Display: :0 (video window will show on your Pi screen)"
+echo "  Running in HEADLESS mode (no video window)"
+echo "  Events will sync to backend every 30 seconds"
+echo "  Check dashboard: http://$BACKEND_IP:8000/dashboard"
 echo "  Press Ctrl+C to stop (this will also stop face_processor)"
 echo "============================================"
 
-export DISPLAY=:0
-python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL" --display :0
+# Run WITHOUT display to avoid segfault on headless Pi
+# Events still fire and sync - just no video window
+python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL"
 
-# When main.py exits (Ctrl+C or window closed), also stop the face processor
+# When main.py exits (Ctrl+C or crash), also stop the face processor
 echo ""
 echo "Stopping face_processor.py (pid $FP_PID)..."
 kill $FP_PID 2>/dev/null
 wait $FP_PID 2>/dev/null
 echo "Done."
+
