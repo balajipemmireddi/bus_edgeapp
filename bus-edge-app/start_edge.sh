@@ -6,23 +6,8 @@ BACKEND_IP="192.168.29.83"
 BACKEND_URL="http://${BACKEND_IP}:8000"
 BUS_ID="bus_14"
 
-# Auto-detect DISPLAY - try common values
-if [ -z "$DISPLAY" ]; then
-  for d in :0 :1 :2; do
-    if [ -S "/tmp/.X11-unix/$(echo $d | tr -d ':')" ]; then
-      export DISPLAY=$d
-      break
-    fi
-  done
-fi
-
-# If still no DISPLAY, warn but don't fail - run in headless mode
-if [ -z "$DISPLAY" ]; then
-  echo "[WARN] No X display found. Running in headless mode (no video window on Pi)."
-  echo "       If using remote desktop, open a terminal FROM the remote desktop and run:"
-  echo "       cd ~/Desktop/bus-edge-app && bash start_edge.sh"
-  export DISPLAY=""
-fi
+# Force DISPLAY to :0 for the physical display connected to Pi
+export DISPLAY=:0
 
 echo "============================================"
 echo "  Starting face_processor.py in the background"
@@ -37,18 +22,10 @@ echo ""
 echo "============================================"
 echo "  Starting main.py (camera + recognition + auto-sync)"
 echo "  Backend target: $BACKEND_URL"
-if [ -n "$DISPLAY" ]; then
-  echo "  Display: $DISPLAY (video window will show on your screen)"
-else
-  echo "  Display: None (running headless - no video window)"
-fi
+echo "  Display: $DISPLAY (video window will show on your Pi screen)"
 echo "============================================"
 
-if [ -n "$DISPLAY" ]; then
-  DISPLAY=$DISPLAY python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL"
-else
-  python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL" 2>&1 | tee main.log
-fi
+DISPLAY=:0 python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL"
 
 # When main.py exits (Ctrl+C or window closed), also stop the face processor
 echo "Stopping face_processor.py (pid $FP_PID)..."
