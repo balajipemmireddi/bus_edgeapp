@@ -98,6 +98,7 @@ def match_against_roster(unknown_encoding, roster: list[dict], backend) -> Match
     best_child_id = None
     best_confidence = -1.0
     second_best_confidence = -1.0
+    second_best_child_id = None
     best_twin_group = None
 
     for student in roster:
@@ -107,17 +108,24 @@ def match_against_roster(unknown_encoding, roster: list[dict], backend) -> Match
         )
         if child_best > best_confidence:
             second_best_confidence = best_confidence
+            second_best_child_id = best_child_id
             best_confidence = child_best
             best_child_id = student["child_id"]
             best_twin_group = student.get("twin_group")
         elif child_best > second_best_confidence:
             second_best_confidence = child_best
+            second_best_child_id = student["child_id"]
 
     if best_confidence < CONFIDENCE_THRESHOLD:
         return MatchResult(child_id=None, confidence=best_confidence)
 
-    # Ambiguous if runner-up is within a small margin - common with twins/siblings.
-    is_ambiguous = bool((best_confidence - second_best_confidence) < 0.08)
+    # Ambiguous ONLY if a DIFFERENT STUDENT is too close (twins/siblings, spec §9).
+    # Don't flag as ambiguous if best and second-best are the same student
+    # (multi-photo enrollment naturally has variance).
+    is_ambiguous = (
+        best_child_id != second_best_child_id and
+        (best_confidence - second_best_confidence) < 0.15
+    )
 
     return MatchResult(
         child_id=best_child_id,
