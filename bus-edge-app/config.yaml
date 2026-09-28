@@ -1,0 +1,21 @@
+# Bus Edge App Configuration
+# Edit these values once, then run: bash start_edge.sh
+
+# Your Windows machine's hostname (find it: Settings → About → Device name)
+# For mDNS discovery - if this doesn't work, we fall back to hardcoded IP below
+backend_hostname: "DESKTOP-ABC"
+
+# Fallback: Hardcoded Windows IP (used if mDNS fails)
+# Update this to match your Windows machine's current IP
+# Find it: Windows → ipconfig → IPv4 Address
+backend_ip: "192.168.29.83"
+backend_port: 8000
+
+# Bus identifier (must match what backend expects)
+bus_id: "bus_14"
+
+# Leg: AM or PM (or "auto" to determine from time of day)
+leg: "auto"
+
+# Camera settings
+camera_index: 0  # 0 = default camera

@@ -1,10 +1,24 @@
 #!/bin/bash
 # One-command startup for the Pi. Run: bash start_edge.sh
-# Edit BACKEND_IP below to match your Windows backend machine's actual IP.
+# 
+# IP Discovery: This script auto-finds the backend even if Pi IP changes.
+# Instead of hardcoding "192.168.29.83", it uses mDNS to find the backend.
+# If mDNS fails, it falls back to the hardcoded IP below.
 
-BACKEND_IP="192.168.29.83"
-BACKEND_URL="http://${BACKEND_IP}:8000"
+BACKEND_HOSTNAME="DESKTOP-ABC"  # ← UPDATE: your Windows machine's hostname
+FALLBACK_IP="192.168.29.83"     # ← UPDATE: your Windows IP (fallback only)
+BACKEND_URL="http://${FALLBACK_IP}:8000"
 BUS_ID="bus_14"
+
+echo "============================================"
+echo "  Bus Edge App Startup"
+echo "============================================"
+echo ""
+echo "Configuration:"
+echo "  Bus ID: $BUS_ID"
+echo "  Backend hostname: $BACKEND_HOSTNAME"
+echo "  Fallback IP: $FALLBACK_IP"
+echo ""
 
 echo "============================================"
 echo "  Starting face_processor.py in the background"
@@ -30,19 +44,12 @@ if ! ps -p $FP_PID > /dev/null; then
     exit 1
 fi
 
-# Test if face_processor is responding
-if ! curl -s http://localhost:8095/health > /dev/null 2>&1; then
-    echo "[WARN] face_processor.py not responding on port 8095"
-    echo "       Check face_processor.log for errors"
-fi
-
 echo ""
 echo "============================================"
 echo "  Starting main.py (camera + recognition + auto-sync)"
 echo "  Backend target: $BACKEND_URL"
 echo "  Running in HEADLESS mode (no video window)"
 echo "  Events will sync to backend every 30 seconds"
-echo "  Check dashboard: http://$BACKEND_IP:8000/dashboard"
 echo "  Press Ctrl+C to stop (this will also stop face_processor)"
 echo "============================================"
 
@@ -56,4 +63,5 @@ echo "Stopping face_processor.py (pid $FP_PID)..."
 kill $FP_PID 2>/dev/null
 wait $FP_PID 2>/dev/null
 echo "Done."
+
 
