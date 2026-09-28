@@ -1,18 +1,17 @@
 """
 Enrollment dashboard - runs on the Pi (port 8090 by default).
-Uses the same quality checks and encoding logic from enroll_student.py.
+Photos are sent to backend for encoding via face_processor.
 Staff opens this from any device on the network, uploads photos.
-Pi validates + encodes locally, then pushes to backend.
+Backend validates + encodes, then stores in central database.
 
 Run:
-    python3 enrollment_dashboard.py --backend-url http://192.168.29.83:8000 --port 8090
+    python3 enrollment_dashboard.py --backend-url http://192.168.1.72:8000 --port 8090
     
 Then open: http://<Pi-IP>:8090 from any browser on the network.
 """
 
 import argparse
 import base64
-import os
 import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -20,10 +19,6 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import requests
 import uvicorn
-
-import db
-from enroll_student import quality_check, get_encoding_for_image, BLUR_THRESHOLD
-from matcher import RealBackend
 
 app = FastAPI(title="Student Enrollment Dashboard")
 
@@ -50,79 +45,43 @@ def base64_to_cv2(b64_str: str):
 
 @app.post("/enroll")
 async def enroll(req: EnrollmentRequest, backend_url: str):
-    """Enroll a student with photos - uses same logic as enroll_student.py CLI."""
+    """Enroll a student - delegate encoding to backend (no local face_recognition needed)."""
     if not req.photos:
         raise HTTPException(400, "No photos provided")
     
-    # Load backend for face encoding
-    try:
-        backend = RealBackend()
-    except ImportError:
-        raise HTTPException(500, "face_recognition not installed")
-    
-    good_encodings = []
-    rejections = []
-    
     print(f"\n[ENROLL] Processing {len(req.photos)} photos for {req.name}...")
     
-    for i, b64_photo in enumerate(req.photos):
-        image = base64_to_cv2(b64_photo)
-        if image is None:
-            rejections.append(f"Photo {i+1}: Could not decode")
-            print(f"  Photo {i+1}: REJECTED - Could not decode")
-            continue
-        
-        # Quality check (same as enroll_student.py)
-        ok, msg = quality_check(image)
-        if not ok:
-            rejections.append(f"Photo {i+1}: {msg}")
-            print(f"  Photo {i+1}: REJECTED - {msg}")
-            continue
-        
-        # Get encoding (same as enroll_student.py)
-        encoding, err = get_encoding_for_image(image, backend)
-        if err:
-            rejections.append(f"Photo {i+1}: {err}")
-            print(f"  Photo {i+1}: REJECTED - {err}")
-            continue
-        
-        good_encodings.append(encoding.tolist())
-        print(f"  Photo {i+1}: accepted")
-    
-    if not good_encodings:
-        msg = f"No usable photos. {'; '.join(rejections)}"
-        print(f"  [FAILED] {msg}")
-        raise HTTPException(400, msg)
-    
-    # Create student record
-    new_student = {
-        "child_id": req.child_id,
-        "name": req.name,
-        "encodings": good_encodings,
-        "assigned_bus_id": req.bus_id,
-        "pickup_stop_id": req.pickup_stop_id,
-        "drop_stop_id": req.drop_stop_id,
-        "twin_group": req.twin_group,
-    }
-    
-    # Save locally first
-    db.init_db()
-    roster = db.load_roster()
-    roster = [s for s in roster if s["child_id"] != req.child_id]  # replace if re-enrolling
-    roster.append(new_student)
-    db.replace_roster(roster)
-    
-    # Push to backend
+    # Send photos to backend for encoding (backend has face_processor)
     try:
-        resp = requests.post(f"{backend_url.rstrip('/')}/api/enroll", json=new_student, timeout=10)
+        payload = {
+            "child_id": req.child_id,
+            "name": req.name,
+            "bus_id": req.bus_id,
+            "pickup_stop_id": req.pickup_stop_id,
+            "drop_stop_id": req.drop_stop_id,
+            "twin_group": req.twin_group,
+            "photos": req.photos  # base64 photos
+        }
+        
+        resp = requests.post(
+            f"{backend_url.rstrip('/')}/api/enroll/centralized",
+            json=payload,
+            timeout=60
+        )
         resp.raise_for_status()
-        msg = f"✓ Enrolled with {len(good_encodings)} encoding(s)"
-        print(f"  [SUCCESS] {msg}")
-        return {"status": "success", "message": msg, "child_id": req.child_id}
+        result = resp.json()
+        
+        if result.get("status") == "success":
+            print(f"  ✓ Enrolled with {result.get('encodings_count', 0)} encoding(s)")
+            return result
+        else:
+            raise Exception(result.get("message", "Unknown error"))
+    
+    except requests.exceptions.Timeout:
+        raise HTTPException(504, "Backend timeout - face_processor may be slow or unreachable")
     except Exception as e:
-        msg = f"Saved locally but backend sync failed: {str(e)}"
-        print(f"  [PARTIAL] {msg}")
-        return {"status": "partial", "message": msg, "child_id": req.child_id}
+        print(f"  ✗ Failed: {str(e)}")
+        raise HTTPException(502, f"Backend enrollment failed: {str(e)}")
 
 
 @app.get("/", response_class=HTMLResponse)
