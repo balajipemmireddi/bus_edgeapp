@@ -312,7 +312,8 @@ def main():
                 process_count += 1
                 roster = db.load_roster()
                 if not roster:
-                    print(f"[WARN] Empty roster - no students to match. Did roster sync succeed?")
+                    if process_count % 300 == 0:  # Log only every 300 frames (~10 seconds)
+                        print(f"[WARN] Empty roster - no students to match. Did roster sync succeed?")
                 if roster:
                     t0 = time.time()
                     last_draw_items = process_frame(frame, backend, roster, args.bus_id, current_leg(args.leg), tracks)
