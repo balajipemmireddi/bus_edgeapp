@@ -1,10 +1,21 @@
-# Pi Edge App - Complete Setup Guide
+# Bus System - Complete Setup Guide
 
-## Problem: IP Address Keeps Changing
+## Architecture: Backend-Centric Design
 
-Your Pi's IP keeps changing (e.g., 192.168.29.220 → 192.168.29.100). This breaks the hardcoded connection.
+```
+Backend (Windows) - Central Authority
+├── All student data (CRUD operations)
+├── Management dashboard (view/edit/delete)
+├── Event storage & live dashboard
+└── Roster sync API
 
-**Solution:** We now use mDNS (Multicast DNS) to auto-discover the backend by hostname instead of hardcoding IP.
+Pi (Edge Device) - Read-Only Worker
+├── Face detection & recognition (local)
+├── Event queue (fires PICKED_UP/DROPPED locally)
+└── Auto-syncs events to backend every 30s
+```
+
+**Key Benefit:** If Pi fails, all student data and management remains on Windows. Pi just syncs roster every 30s and caches locally for fast detection.
 
 ---
 
@@ -15,67 +26,75 @@ Your Pi's IP keeps changing (e.g., 192.168.29.220 → 192.168.29.100). This brea
 hostname
 ```
 
-You'll see something like: `DESKTOP-ABC123`
+Example output: `DESKTOP-ABC123`
 
 ---
 
-## Step 2: Configure the Pi App
+## Step 2: Configure Pi Connection
 
-**On Pi (via SSH):**
+**On Pi (SSH Terminal):**
 
-Edit the config file:
+Edit config file:
 ```bash
 cd ~/Desktop/bus-edge-app/bus-edge-app
 nano config.yaml
 ```
 
-Update these two values:
+Update these values:
 
 ```yaml
 backend_hostname: "DESKTOP-ABC123"    # ← your Windows hostname from Step 1
-backend_ip: "192.168.29.83"           # ← your current Windows IP (as fallback)
+backend_ip: "192.168.1.72"            # ← your Windows IP (fallback)
+backend_port: 8000
+bus_id: "bus_14"
+leg: "auto"
 ```
 
 Save: `Ctrl+O` → Enter → `Ctrl+X`
 
 ---
 
-## Step 3: Install mDNS Library (Optional but Recommended)
-
-This enables automatic hostname discovery. If skipped, the app falls back to hardcoded IP.
-
-```bash
-pip install zeroconf
-```
-
----
-
-## Step 4: Install Dependencies
+## Step 3: Install Dependencies on Pi
 
 ```bash
 cd ~/Desktop/bus-edge-app/bus-edge-app
 bash install_dependencies.sh
 ```
 
-This installs:
-- `face_recognition` (dlib - face detection)
-- `opencv-python` (camera)
-- `numpy` (math)
+Installs:
+- `face_recognition` (dlib face detection)
+- `opencv-python` (camera capture)
+- `zeroconf` (auto IP discovery)
 
 ---
 
-## Step 5: Start the App
+## Step 4: Start Backend on Windows
 
+**Command Prompt:**
+```cmd
+cd c:\Users\balaj\Documents\projects\SFace\bus-backend\bus-backend
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Wait for:
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+---
+
+## Step 5: Start Pi Edge App
+
+**Pi Terminal 1:**
 ```bash
+cd ~/Desktop/bus-edge-app/bus-edge-app
 bash start_edge.sh
 ```
 
-You should see:
+Expected output:
 ```
-[IP_DISCOVERY] Attempting mDNS lookup for DESKTOP-ABC123.local...
-[IP_DISCOVERY] ✓ Found backend at http://192.168.X.X:8000
 [BACKEND] ✓ Using RealBackend (face_recognition with dlib)
-[SYNC] Background sync started: http://192.168.X.X:8000
+[SYNC] Background sync started: http://192.168.1.72:8000
 [HEARTBEAT] bus_14 online
 [SYNC] roster updated: 6 students
 [DEBUG] Waiting for faces in camera...
@@ -83,91 +102,203 @@ You should see:
 
 ---
 
-## Step 6: Test Event Detection
+## Dashboard Access Points
 
-1. Walk in front of camera
-2. Look for logs:
-   ```
-   [DETECTION] Found 1 face(s) in frame 45
-   [MATCH] confidence=0.87, child_id=child_001
-   ✓ [EVENT FIRED] PICKED_UP
-   ```
-3. Check dashboard: `http://192.168.29.83:8000/dashboard`
-4. Event should appear in "Live Events" tab within 30 seconds
+| Tool | URL | Purpose |
+|------|-----|---------|
+| **Management** | `http://192.168.1.72:8000/management` | View, edit, delete students (CENTRAL) |
+| **Live Events** | `http://192.168.1.72:8000/dashboard` | See PICKED_UP/DROPPED events |
+| **Enrollment** | `http://<pi-ip>:8090` | Upload photos & enroll new students |
 
 ---
 
-## If IP Changes Again
+## How Everything Works
 
-The beauty of this setup: **you don't need to change anything!**
+### 1. Enroll a New Student
+```
+You open: http://<pi-ip>:8090
+  ↓
+Upload photos from phone/camera
+  ↓
+Pi processes: dlib detects face → creates encoding
+  ↓
+Backend stores: student + encodings in database
+  ↓
+Every Pi syncs: pulls fresh roster every 30s
+  ↓
+Next detection: face matched → event fires → dashboard updates
+```
 
-- If Pi IP changes: mDNS will automatically find the backend by hostname
-- If Windows IP changes: mDNS will automatically find it
-- If mDNS fails: it falls back to the IP in `config.yaml`
-- No manual updates needed!
+### 2. Manage Students (BACKEND ONLY)
+```
+You open: http://192.168.1.72:8000/management
+  ↓
+View all students (sorted by name)
+  ↓
+Edit: change name, bus, stops (data stays on backend)
+  ↓
+Delete: removes from all Pis on next sync
+  ↓
+Export: download JSON backup
+```
+
+### 3. View Live Events
+```
+You open: http://192.168.1.72:8000/dashboard
+  ↓
+See PICKED_UP/DROPPED in real-time
+  ↓
+Events from any Pi auto-sync every 30s
+  ↓
+Sorted by timestamp (newest first)
+```
+
+---
+
+## Resilience Design
+
+### Pi Fails
+- ✓ Backend still has all data
+- ✓ Management dashboard still works
+- ✓ Can add/edit/delete students
+- ✓ When Pi restarts: syncs roster, resumes detection
+
+### Backend Fails
+- ✓ Pi still detects faces locally
+- ✓ Pi still fires events, queues them
+- ✓ When backend restarts: Pi auto-syncs events
+- ✓ No data loss (queued locally)
+
+### Network Issues
+- ✓ Pi retries sync every 30s
+- ✓ Backend falls back to hardcoded IP if mDNS fails
+- ✓ Events queue locally until sync succeeds
+- ✓ Configurable IP in `config.yaml`
+
+---
+
+## Multi-Pi Setup
+
+If running multiple Pis (multiple buses):
+
+**Each Pi:**
+```bash
+# Update for each bus
+backend_ip: "192.168.1.72"      # Same backend for all
+bus_id: "bus_14"                # Different per Pi
+bus_id: "bus_15"                # Another bus
+```
+
+**All Pis:**
+- Pull same roster from backend
+- All sync events to backend
+- All show on one dashboard
+
+**Backend:**
+- Single database for all buses
+- One management dashboard for all students
+- Events tagged by bus_id
 
 ---
 
 ## Troubleshooting
 
-### "mDNS lookup failed"
-- Make sure `zeroconf` is installed: `pip install zeroconf`
-- Or manually update `config.yaml` with your Windows IP
+### Backend Not Reachable from Pi
+```bash
+# From Pi, test:
+ping 192.168.1.72
+# Should respond immediately
 
-### "Backend not reachable"
-- Check Windows is running: `ping 192.168.29.83` from Pi
-- Update the fallback IP in `config.yaml`
-- Make sure both are on same WiFi network
+# Check if backend is running:
+# (On Windows, make sure you ran: python -m uvicorn main:app)
+```
 
-### "No faces detected"
-- Run: `python3 -c "import face_recognition; print('OK')"`
-- If error: run `install_dependencies.sh` again
-- Check lighting (need bright room)
-- Check camera angle (face should be centered)
+### No Face Detection
+```bash
+# Check face_recognition is installed:
+python3 -c "import face_recognition; print('OK')"
 
-### "Still getting segfault"
-- This was fixed in latest version
-- Pull latest: `git pull origin main`
+# Check lighting: need bright room, face centered in camera
+# Check camera: ls /dev/video*
+```
+
+### Students Not Syncing to Pi
+```bash
+# Check backend has students:
+# Open: http://192.168.1.72:8000/management
+
+# Wait 30s for sync
+# Check Pi logs: look for [SYNC] roster updated
+```
+
+### Want to Delete All Students
+```bash
+# Option 1: Delete one-by-one via management dashboard
+# Open: http://192.168.1.72:8000/management → click Delete
+
+# Option 2: Reset backend database
+# On Windows, delete: c:\Users\balaj\Documents\projects\SFace\bus-backend\bus-backend\data\backend.db
+# Backend recreates empty DB on next startup
+```
+
+---
+
+## Key Design Principles
+
+✓ **Backend is the source of truth** - all data lives here
+✓ **Pi is read-only for roster** - syncs every 30s, can't modify students locally
+✓ **Events sync automatically** - no manual intervention
+✓ **Resilient to failures** - either Pi or backend can fail independently
+✓ **Horizontally scalable** - add more Pis, all sync to same backend
 
 ---
 
 ## One-Time Setup Checklist
 
-- [ ] Found Windows hostname (Step 1)
-- [ ] Updated `config.yaml` with hostname and IP (Step 2)
-- [ ] Installed `zeroconf` (Step 3)
-- [ ] Ran `install_dependencies.sh` (Step 4)
-- [ ] Verified `face_recognition` works: `python3 -c "import face_recognition; print('OK')"`
-- [ ] Ran `bash start_edge.sh` successfully
-- [ ] Walked in front of camera and saw `[DETECTION]` logs
-- [ ] Event appeared in dashboard within 30 seconds
+- [ ] Windows hostname found
+- [ ] `config.yaml` updated on Pi
+- [ ] Backend started on Windows (port 8000)
+- [ ] `install_dependencies.sh` ran successfully on Pi
+- [ ] `bash start_edge.sh` running on Pi
+- [ ] Opened `http://192.168.1.72:8000/management` and see student list
+- [ ] Opened `http://<pi-ip>:8090` and enrolled a test student
+- [ ] Walked in front of camera, saw `[DETECTION]` logs
+- [ ] Event appeared in `http://192.168.1.72:8000/dashboard` within 30s
+- [ ] Deleted test student via management dashboard, verified Pi synced
 
 ---
 
-## Architecture (How It Works)
+## Production Deployment Notes
 
-```
-Pi Edge App (192.168.29.220)
-    ↓ (uses mDNS to find)
-    ↓
-Windows Backend (DESKTOP-ABC123 → resolves to 192.168.29.83:8000)
-    ↓ (syncs events every 30s)
-    ↓
-Dashboard (displays PICKED_UP/DROPPED)
-```
+When ready for production:
 
-If Pi IP changes to 192.168.29.100 → still finds backend (mDNS)
-If Windows IP changes to 192.168.29.50 → still finds backend (mDNS)
-No code changes needed!
+1. **Database:** Switch backend from SQLite to PostgreSQL (§4 of spec)
+   - Just change connection string in `main.py`
+   - Schema stays the same
+
+2. **Security:** Add authentication to dashboard
+   - Add JWT tokens or password protection
+   - Enroll endpoint should require API key
+
+3. **Multiple Buses:** Scale horizontally
+   - Keep backend on Windows
+   - Add more Pis, each with unique `bus_id`
+   - All sync to same backend
+
+4. **Backup:** Export students regularly
+   - Via management dashboard: "📥 Export All"
+   - Stores JSON with all encodings
+   - Can restore to any backend
 
 ---
 
 ## Support
 
-If something doesn't work:
+**Check logs where you started the process:**
+- Edge app: Terminal where you ran `bash start_edge.sh`
+- Backend: Command Prompt where you ran `python -m uvicorn main:app`
 
-1. Check logs on Pi: `tail -f ~/Desktop/bus-edge-app/bus-edge-app/face_processor.log`
-2. Check backend dashboard: `http://192.168.29.83:8000/dashboard`
-3. Verify connectivity: `ping 192.168.29.83` from Pi
-4. Reinstall: `bash install_dependencies.sh`
-
+**Dashboards:**
+- **Management:** `http://192.168.1.72:8000/management`
+- **Events:** `http://192.168.1.72:8000/dashboard`
+- **Enrollment:** `http://<pi-ip>:8090`
