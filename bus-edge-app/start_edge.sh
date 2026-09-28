@@ -6,7 +6,7 @@
 # If mDNS fails, it falls back to the hardcoded IP below.
 
 BACKEND_HOSTNAME="DESKTOP-ABC"  # ← UPDATE: your Windows machine's hostname
-FALLBACK_IP="192.168.29.83"     # ← UPDATE: your Windows IP (fallback only)
+FALLBACK_IP="192.168.1.72"      # ← UPDATE: your Windows IP (fallback only)
 BACKEND_URL="http://${FALLBACK_IP}:8000"
 BUS_ID="bus_14"
 
