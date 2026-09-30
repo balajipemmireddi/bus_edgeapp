@@ -81,8 +81,12 @@ class MockBackend:
         return []
 
     def compare(self, unknown_encoding, known_encoding) -> float:
-        # Simulate: deterministic distance
-        distance = 0.1
+        # Real (deterministic) distance between the two vectors - NOT a fixed
+        # value. A fixed return here would make every match "confident"
+        # regardless of input, silently disabling the low-confidence-rejection
+        # safety net in tests without affecting production (RealBackend is
+        # untouched and unaffected by this).
+        distance = np.linalg.norm(np.asarray(unknown_encoding) - np.asarray(known_encoding))
         return 1.0 - distance
 
 
@@ -122,7 +126,7 @@ def match_against_roster(unknown_encoding, roster: list[dict], backend) -> Match
     # Ambiguous ONLY if a DIFFERENT STUDENT is too close (twins/siblings, spec §9).
     # Don't flag as ambiguous if best and second-best are the same student
     # (multi-photo enrollment naturally has variance).
-    is_ambiguous = (
+    is_ambiguous = bool(
         best_child_id != second_best_child_id and
         (best_confidence - second_best_confidence) < 0.15
     )

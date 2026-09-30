@@ -14,6 +14,7 @@ FACE_PROCESSOR_URL environment variable).
 
 import argparse
 import base64
+import sys
 import numpy as np
 import cv2
 from fastapi import FastAPI
@@ -23,6 +24,19 @@ app = FastAPI(title="Face Processor (internal - called by backend only)")
 
 MIN_RESOLUTION = (100, 100)
 BLUR_THRESHOLD = 15.0  # matches the value already tuned on real phone-camera uploads
+
+# Import face_recognition ONCE at startup, not lazily inside the request handler.
+# Lazy import meant a broken dlib install would let this service start up fine
+# and only fail the moment someone actually tried to enroll a student - the
+# worst possible time to discover it. Fail loudly now instead.
+try:
+    import face_recognition
+    print("[STARTUP] face_recognition imported successfully - dlib is working.")
+except ImportError as e:
+    print(f"[FATAL] face_recognition/dlib is NOT installed or broken: {e}")
+    print("[FATAL] Fix this before running the app - install via piwheels:")
+    print("[FATAL]   pip install face-recognition --extra-index-url https://www.piwheels.org/simple")
+    sys.exit(1)
 
 
 class EncodeRequest(BaseModel):
@@ -54,32 +68,39 @@ def quality_check(image) -> tuple[bool, str]:
 
 @app.post("/encode")
 def encode(req: EncodeRequest):
-    import face_recognition  # only ever imported here, on the Pi, where it's proven to work
-
     good_encodings = []
     rejections = []
 
     for i, b64_photo in enumerate(req.photos):
-        image = base64_to_cv2(b64_photo)
-        ok, msg = quality_check(image)
-        if not ok:
-            rejections.append(f"Photo {i+1}: {msg}")
-            continue
+        try:
+            image = base64_to_cv2(b64_photo)
+            ok, msg = quality_check(image)
+            if not ok:
+                rejections.append(f"Photo {i+1}: {msg}")
+                continue
 
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        locations = face_recognition.face_locations(rgb)
-        if len(locations) != 1:
-            rejections.append(f"Photo {i+1}: expected 1 face, found {len(locations)}")
-            continue
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            locations = face_recognition.face_locations(rgb)
+            if len(locations) != 1:
+                rejections.append(f"Photo {i+1}: expected 1 face, found {len(locations)}")
+                continue
 
-        encodings = face_recognition.face_encodings(rgb, known_face_locations=locations)
-        if not encodings:
-            rejections.append(f"Photo {i+1}: encoding failed")
-            continue
+            encodings = face_recognition.face_encodings(rgb, known_face_locations=locations)
+            if not encodings:
+                rejections.append(f"Photo {i+1}: encoding failed")
+                continue
 
-        good_encodings.append(encodings[0].tolist())
-        print(f"  Photo {i+1}: accepted")
+            good_encodings.append(encodings[0].tolist())
+            print(f"  Photo {i+1}: accepted")
+        except Exception as e:
+            # A single bad photo should never take down the whole request -
+            # log it clearly and keep processing the rest.
+            print(f"[ERROR] Photo {i+1} raised an unexpected exception: {e}")
+            import traceback
+            traceback.print_exc()
+            rejections.append(f"Photo {i+1}: unexpected error - {e}")
 
+    print(f"[RESULT] {len(good_encodings)} accepted, {len(rejections)} rejected")
     return {"encodings": good_encodings, "rejections": rejections}
 
 
