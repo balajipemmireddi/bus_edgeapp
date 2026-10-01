@@ -101,12 +101,30 @@ def draw_face_box(frame, location_full, label, color):
 class ChildTrack:
     """Rolling history of box sizes for one child, used to estimate direction
     without needing a discrete burst - just looks at the trend across the last
-    few times this child was seen."""
+    few times this child was seen.
+
+    FIXED: comparing just box_sizes[-1] vs box_sizes[0] on a tiny 5-frame window
+    was extremely noisy for someone standing still in front of the camera (not
+    actually walking through a door) - small frame-to-frame jitter in the
+    detected box size flipped ENTERING/EXITING on almost every single frame,
+    which is exactly the flicker seen in the logs. Fixed with:
+      1. A minimum % size change required before direction is allowed to change
+         at all (ignores jitter below this threshold - "stable" is a real
+         third outcome now, not forced into one direction or the other)
+      2. A required number of consistent frames in the new direction before
+         committing to a direction FLIP (one noisy frame can't flip it)
+    """
+
+    MIN_CHANGE_RATIO = 0.08       # ignore size changes smaller than 8% - likely just jitter
+    FRAMES_TO_CONFIRM_FLIP = 3    # need this many consistent readings before changing direction
 
     def __init__(self):
         self.box_sizes = []
         self.last_seen = 0.0
         self.fired_this_visit = False
+        self.confirmed_direction = Direction.ENTERING
+        self._pending_direction = None
+        self._pending_count = 0
 
     def update(self, box_size):
         self.box_sizes.append(box_size)
@@ -114,10 +132,41 @@ class ChildTrack:
             self.box_sizes.pop(0)
         self.last_seen = time.time()
 
-    def direction(self) -> Direction:
         if len(self.box_sizes) < 2:
-            return Direction.ENTERING
-        return Direction.ENTERING if self.box_sizes[-1] > self.box_sizes[0] else Direction.EXITING
+            return
+
+        baseline = self.box_sizes[0]
+        latest = self.box_sizes[-1]
+        change_ratio = (latest - baseline) / baseline if baseline else 0.0
+
+        if abs(change_ratio) < self.MIN_CHANGE_RATIO:
+            # Within noise tolerance - not a real trend either way, don't touch
+            # confirmed_direction and reset any pending flip in progress.
+            self._pending_direction = None
+            self._pending_count = 0
+            return
+
+        candidate = Direction.ENTERING if change_ratio > 0 else Direction.EXITING
+        if candidate == self.confirmed_direction:
+            self._pending_direction = None
+            self._pending_count = 0
+            return
+
+        # A real, above-noise trend disagrees with our current confirmed
+        # direction - require it to show up consistently before flipping.
+        if candidate == self._pending_direction:
+            self._pending_count += 1
+        else:
+            self._pending_direction = candidate
+            self._pending_count = 1
+
+        if self._pending_count >= self.FRAMES_TO_CONFIRM_FLIP:
+            self.confirmed_direction = candidate
+            self._pending_direction = None
+            self._pending_count = 0
+
+    def direction(self) -> Direction:
+        return self.confirmed_direction
 
     def is_stale(self) -> bool:
         return (time.time() - self.last_seen) > TRACK_FORGET_SEC
@@ -296,6 +345,9 @@ def main():
     fps_frame_count = 0
     fps_start_time = time.time()
     fps = 0.0
+    last_logged_leg = current_leg(args.leg)
+    print(f"[LEG] Starting leg: {last_logged_leg.value}"
+          + (" (auto - will flip AM->PM based on wall clock time)" if args.leg == "auto" else " (manually pinned)"))
 
     print(f"Edge app running for {args.bus_id} (continuous mode). Press 'q' to stop.")
     print(f"[DEBUG] CONFIDENCE_THRESHOLD = {0.45} (from matcher.py)")
@@ -315,8 +367,14 @@ def main():
                     if process_count % 300 == 0:  # Log only every 300 frames (~10 seconds)
                         print(f"[WARN] Empty roster - no students to match. Did roster sync succeed?")
                 if roster:
+                    this_leg = current_leg(args.leg)
+                    if this_leg != last_logged_leg:
+                        print(f"[LEG] *** Leg changed from {last_logged_leg.value} to {this_leg.value} *** "
+                              f"(wall clock crossed the AM/PM boundary - if this is mid-testing and "
+                              f"not a real new leg, re-run with --leg AM or --leg PM to pin it)")
+                        last_logged_leg = this_leg
                     t0 = time.time()
-                    last_draw_items = process_frame(frame, backend, roster, args.bus_id, current_leg(args.leg), tracks)
+                    last_draw_items = process_frame(frame, backend, roster, args.bus_id, this_leg, tracks)
                     dt = time.time() - t0
                     if dt > 0.5:
                         print(f"[TIMING] recognition pass took {dt:.2f}s")
