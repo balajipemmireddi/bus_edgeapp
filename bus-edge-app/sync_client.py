@@ -7,14 +7,22 @@ Integrated into main.py via a background thread for continuous updates.
 
 Usage:
     python3 sync_client.py --backend-url http://<BACKEND_IP>:8000 --bus-id bus_14 --loop
+
+Or configure via .env file and run:
+    python3 sync_client.py --loop
 """
 
 import argparse
 import time
 import requests
 import threading
+import os
+from dotenv import load_dotenv
 
 import db
+
+# Load .env file
+load_dotenv()
 
 
 class SyncClient:
@@ -108,11 +116,19 @@ class SyncClient:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend-url", required=True)
-    parser.add_argument("--bus-id", required=True)
+    parser.add_argument("--backend-url", default=os.environ.get("BACKEND_URL"), help="Backend URL (from .env or CLI)")
+    parser.add_argument("--bus-id", default=os.environ.get("BUS_ID"), help="Bus ID (from .env or CLI)")
     parser.add_argument("--loop", action="store_true", help="Run continuously")
     parser.add_argument("--interval", type=int, default=30)
     args = parser.parse_args()
+    
+    # Validate required args
+    if not args.backend_url:
+        print("[ERROR] --backend-url is required or set BACKEND_URL in .env")
+        exit(1)
+    if not args.bus_id:
+        print("[ERROR] --bus-id is required or set BUS_ID in .env")
+        exit(1)
     
     db.init_db()
     client = SyncClient(args.backend_url, args.bus_id)

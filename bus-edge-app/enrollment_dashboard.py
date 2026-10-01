@@ -4,7 +4,12 @@ Photos are sent to backend for encoding via face_processor.
 Staff opens this from any device on the network, uploads photos.
 Backend validates + encodes, then stores in central database.
 
-Run:
+Configuration via .env file or command-line arguments:
+    cp .env.example .env
+    # Edit .env with your backend URL
+    python3 enrollment_dashboard.py
+
+Or pass via CLI:
     python3 enrollment_dashboard.py --backend-url http://192.168.1.72:8000 --port 8090
     
 Then open: http://<Pi-IP>:8090 from any browser on the network.
@@ -19,6 +24,11 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import requests
 import uvicorn
+import os
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
 
 app = FastAPI(title="Student Enrollment Dashboard")
 
@@ -397,11 +407,14 @@ def dashboard():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend-url", required=True, help="Backend URL (e.g., http://192.168.29.83:8000)")
-    parser.add_argument("--port", type=int, default=8090, help="Port to run on (default 8090)")
+    parser.add_argument("--backend-url", default=os.environ.get("BACKEND_URL"), help="Backend URL (from .env or CLI)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("ENROLLMENT_DASHBOARD_PORT", "8090")), help="Port to run on (default 8090)")
     args = parser.parse_args()
     
-    db.init_db()
+    # Validate backend URL
+    if not args.backend_url:
+        print("[ERROR] --backend-url is required or set BACKEND_URL in .env")
+        exit(1)
     
     # Store backend_url for use in endpoint
     app.backend_url = args.backend_url
@@ -420,7 +433,6 @@ def main():
     print(f"\n🎓 Enrollment Dashboard")
     print(f"Open http://<this-device-IP>:{args.port} from any browser on the network")
     print(f"Backend: {args.backend_url}")
-    print(f"Blur threshold: {BLUR_THRESHOLD}")
     print()
     
     uvicorn.run(app, host="0.0.0.0", port=args.port)

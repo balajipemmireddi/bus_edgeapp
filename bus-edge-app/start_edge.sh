@@ -1,23 +1,37 @@
 #!/bin/bash
 # One-command startup for the Pi. Run: bash start_edge.sh
 # 
-# IP Discovery: This script auto-finds the backend even if Pi IP changes.
-# Instead of hardcoding "192.168.29.83", it uses mDNS to find the backend.
-# If mDNS fails, it falls back to the hardcoded IP below.
+# Configuration: Edit the .env file (or .env.example) with your IP addresses
+# This script loads .env and passes variables to Python scripts
 
-BACKEND_HOSTNAME="DESKTOP-ABC"  # ← UPDATE: your Windows machine's hostname
-FALLBACK_IP="192.168.1.72"      # ← UPDATE: your Windows IP (fallback only)
-BACKEND_URL="http://${FALLBACK_IP}:8000"
-BUS_ID="bus_14"
+# Load .env if it exists, otherwise use .env.example as template
+if [ -f ".env" ]; then
+    source .env
+else
+    echo "[WARN] .env not found. Please copy .env.example to .env and edit it."
+    if [ -f ".env.example" ]; then
+        source .env.example
+    else
+        echo "[ERROR] .env.example not found either!"
+        exit 1
+    fi
+fi
+
+# Override with defaults if not set
+BACKEND_URL="${BACKEND_URL:-http://192.168.1.72:8000}"
+BUS_ID="${BUS_ID:-bus_14}"
+ENROLLMENT_DASHBOARD_PORT="${ENROLLMENT_DASHBOARD_PORT:-8090}"
+FACE_PROCESSOR_URL="${FACE_PROCESSOR_URL:-http://192.168.1.85:8095}"
 
 echo "============================================"
 echo "  Bus Edge App Startup"
 echo "============================================"
 echo ""
-echo "Configuration:"
+echo "Configuration (from .env):"
 echo "  Bus ID: $BUS_ID"
-echo "  Backend hostname: $BACKEND_HOSTNAME"
-echo "  Fallback IP: $FALLBACK_IP"
+echo "  Backend URL: $BACKEND_URL"
+echo "  Face Processor: $FACE_PROCESSOR_URL"
+echo "  Enrollment Dashboard Port: $ENROLLMENT_DASHBOARD_PORT"
 echo ""
 
 echo "============================================"
@@ -30,7 +44,9 @@ pkill -f "face_processor.py" 2>/dev/null
 sleep 1
 
 # Start face_processor in background with proper logging
-python3 face_processor.py --port 8095 > face_processor.log 2>&1 &
+# Extract port from FACE_PROCESSOR_URL (e.g., http://192.168.1.85:8095 -> 8095)
+FP_PORT=$(echo "$FACE_PROCESSOR_URL" | grep -oP ':\K[0-9]+$' || echo "8095")
+python3 face_processor.py --port $FP_PORT > face_processor.log 2>&1 &
 FP_PID=$!
 echo "face_processor.py running (pid $FP_PID), logging to face_processor.log"
 
@@ -53,6 +69,11 @@ echo "  Events will sync to backend every 30 seconds"
 echo "  Press Ctrl+C to stop (this will also stop face_processor)"
 echo "============================================"
 
+# Export variables for subprocesses to use
+export BACKEND_URL
+export BUS_ID
+export FACE_PROCESSOR_URL
+
 # Run WITHOUT display to avoid segfault on headless Pi
 # Events still fire and sync - just no video window
 python3 main.py --bus-id "$BUS_ID" --leg auto --backend-url "$BACKEND_URL"
@@ -63,5 +84,6 @@ echo "Stopping face_processor.py (pid $FP_PID)..."
 kill $FP_PID 2>/dev/null
 wait $FP_PID 2>/dev/null
 echo "Done."
+
 
 
