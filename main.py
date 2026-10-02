@@ -275,7 +275,6 @@ def main():
     print(f"[CONFIG] Leg mode: {args.leg}")
 
     # Set up display if on Pi with physical screen
-    import os
     if args.display:
         os.environ["DISPLAY"] = args.display
         print(f"[DISPLAY] Set DISPLAY={args.display}")
