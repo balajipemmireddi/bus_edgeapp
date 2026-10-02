@@ -80,7 +80,7 @@ async def enroll_handler(req: EnrollmentRequest):
         resp = requests.post(
             f"{backend_url.rstrip('/')}/api/enroll/centralized",
             json=payload,
-            timeout=60
+            timeout=180  # Increased to 3 minutes for Pi encoding + network overhead
         )
         resp.raise_for_status()
         result = resp.json()
@@ -92,7 +92,7 @@ async def enroll_handler(req: EnrollmentRequest):
             raise Exception(result.get("message", "Unknown error"))
     
     except requests.exceptions.Timeout:
-        raise HTTPException(504, "Backend timeout - face_processor may be slow or unreachable")
+        raise HTTPException(504, "Enrollment timeout - Pi face processor took too long. Try with fewer photos.")
     except Exception as e:
         print(f"  ✗ Failed: {str(e)}")
         raise HTTPException(502, f"Backend enrollment failed: {str(e)}")
