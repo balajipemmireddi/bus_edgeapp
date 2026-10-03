@@ -13,6 +13,7 @@ Pi reboot mid-route never loses or duplicates an event (§7.5).
 import sqlite3
 import json
 import datetime
+import uuid
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -61,9 +62,10 @@ def init_db():
 
             CREATE TABLE IF NOT EXISTS event_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_uuid TEXT NOT NULL UNIQUE,
                 child_id TEXT,
                 event_type TEXT NOT NULL,      -- PICKED_UP | DROPPED | EXIT_UNEXPECTED_LOCATION
-                                                -- | UNMATCHED_REVIEW
+                                                -- | UNMATCHED_REVIEW | AMBIGUOUS_REVIEW
                 confidence REAL,
                 photo_path TEXT,
                 gps_lat REAL,
@@ -74,6 +76,16 @@ def init_db():
             );
             """
         )
+        # Upgrade databases created before event UUIDs were introduced.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(event_queue)")}
+        if "event_uuid" not in columns:
+            conn.execute("ALTER TABLE event_queue ADD COLUMN event_uuid TEXT")
+            rows = conn.execute("SELECT id FROM event_queue WHERE event_uuid IS NULL").fetchall()
+            conn.executemany(
+                "UPDATE event_queue SET event_uuid=? WHERE id=?",
+                [(str(uuid.uuid4()), row["id"]) for row in rows],
+            )
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_event_queue_uuid ON event_queue(event_uuid)")
 
 
 def load_roster() -> list[dict]:
@@ -161,6 +173,35 @@ def set_status(child_id: str, status: str, date: str | None = None):
         )
 
 
+def _insert_event(conn, child_id, event_type, confidence, photo_path, gps, bus_id, timestamp):
+    conn.execute(
+        """INSERT INTO event_queue
+           (event_uuid, child_id, event_type, confidence, photo_path, gps_lat, gps_lng, bus_id, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (str(uuid.uuid4()), child_id, event_type, confidence, photo_path,
+         gps[0] if gps else None, gps[1] if gps else None, bus_id, timestamp),
+    )
+
+
+def record_transition_and_event(
+    child_id: str, status: str, event_type: str, confidence: float,
+    photo_path: str, gps: tuple[float, float] | None, bus_id: str,
+    date: str | None = None,
+):
+    """Persist a state transition and its outbox event in one SQLite transaction."""
+    date = date or _today()
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO daily_state (child_id, date, status, last_event_time)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(child_id, date) DO UPDATE SET status=excluded.status,
+                                                          last_event_time=excluded.last_event_time""",
+            (child_id, date, status, now),
+        )
+        _insert_event(conn, child_id, event_type, confidence, photo_path, gps, bus_id, now)
+
+
 def queue_event(
     child_id: str,
     event_type: str,
@@ -170,21 +211,8 @@ def queue_event(
     bus_id: str,
 ):
     with get_conn() as conn:
-        conn.execute(
-            """INSERT INTO event_queue
-               (child_id, event_type, confidence, photo_path, gps_lat, gps_lng, bus_id, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                child_id,
-                event_type,
-                confidence,
-                photo_path,
-                gps[0] if gps else None,
-                gps[1] if gps else None,
-                bus_id,
-                datetime.datetime.now().isoformat(),
-            ),
-        )
+        _insert_event(conn, child_id, event_type, confidence, photo_path, gps, bus_id,
+                      datetime.datetime.now(datetime.timezone.utc).isoformat())
 
 
 def get_unsynced_events() -> list[dict]:

@@ -68,6 +68,7 @@ def process_detection(
     leg: Leg,
     student: dict,
     stop_coords_lookup: dict[str, tuple[float, float]],
+    bus_id: str | None = None,
 ) -> Outcome:
     """
     Implements the trigger table from spec §7.4.
@@ -92,7 +93,13 @@ def process_detection(
         and status == "NOT_PICKED_UP"
         and within_geofence(detection.gps, pickup_stop)
     ):
-        db.set_status(child_id, "ON_BUS_TO_SCHOOL")
+        if bus_id:
+            db.record_transition_and_event(
+                child_id, "ON_BUS_TO_SCHOOL", "PICKED_UP", detection.confidence,
+                "", detection.gps, bus_id,
+            )
+        else:
+            db.set_status(child_id, "ON_BUS_TO_SCHOOL")
         return Outcome.FIRE_PICKED_UP
 
     if (
@@ -117,7 +124,13 @@ def process_detection(
         and status == "ON_BUS_TO_HOME"
         and within_geofence(detection.gps, drop_stop)
     ):
-        db.set_status(child_id, "DROPPED")
+        if bus_id:
+            db.record_transition_and_event(
+                child_id, "DROPPED", "DROPPED", detection.confidence,
+                "", detection.gps, bus_id,
+            )
+        else:
+            db.set_status(child_id, "DROPPED")
         return Outcome.FIRE_DROPPED
 
     # Exit at a location that isn't the registered stop - don't discard silently,
@@ -125,6 +138,11 @@ def process_detection(
     if detection.direction == Direction.EXITING and detection.gps is not None:
         expected_stop = drop_stop if leg == Leg.PM else None
         if expected_stop and not within_geofence(detection.gps, expected_stop):
+            if bus_id:
+                db.queue_event(
+                    child_id, "EXIT_UNEXPECTED_LOCATION", detection.confidence,
+                    "", detection.gps, bus_id,
+                )
             return Outcome.FIRE_EXIT_UNEXPECTED
 
     return Outcome.DISCARD

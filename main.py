@@ -20,6 +20,7 @@ nothing was drawn to screen while it processed. This version instead:
      machine's own dedup logic (§7) already prevents repeat-firing, so
      continuous detection of an already-PICKED_UP child is a safe no-op
   6. Queues any fired event locally (§7.5) - sync_client.py handles upload
+  7. Queues unmatched and ambiguous faces to review queue with photo evidence
 
 Run this as a systemd service in production (see spec §"Hardware & Deployment").
 For now, run directly:  python3 main.py --bus-id bus_14 --leg auto
@@ -33,6 +34,7 @@ import numpy as np
 import threading
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 
 # Load .env file for configuration
 load_dotenv()
@@ -52,6 +54,46 @@ DETECTION_SCALE = 0.5        # detect on a half-size copy. Combined with the 640
                               # over-shrinking this.)
 TRACK_HISTORY_LEN = 5        # how many recent box sizes to keep per child, for direction
 TRACK_FORGET_SEC = 2.0       # if a child hasn't been seen for this long, forget their track
+
+# Photo directory for review queue evidence
+PHOTOS_DIR = Path(__file__).parent / "data" / "photos"
+PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Frame counter for generating unique photo filenames
+_frame_counter = 0
+_frame_counter_lock = threading.Lock()
+
+
+def save_face_photo(frame, location, event_type: str, face_id: str = "unknown"):
+    """
+    Save a cropped face photo to disk for manual review queue evidence.
+    Returns the relative path from repo root, or empty string if save fails.
+    """
+    global _frame_counter
+    try:
+        with _frame_counter_lock:
+            _frame_counter += 1
+            counter = _frame_counter
+        
+        top, right, bottom, left = location
+        # Crop to the face with some margin
+        margin = 20
+        top = max(0, top - margin)
+        bottom = min(frame.shape[0], bottom + margin)
+        left = max(0, left - margin)
+        right = min(frame.shape[1], right + margin)
+        
+        cropped = frame[top:bottom, left:right]
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"face_{event_type}_{face_id}_{timestamp}_{counter}.jpg"
+        filepath = PHOTOS_DIR / filename
+        
+        cv2.imwrite(str(filepath), cropped)
+        # Return relative path
+        return f"data/photos/{filename}"
+    except Exception as e:
+        print(f"[WARN] Failed to save face photo: {e}")
+        return ""
 
 
 def get_backend():
@@ -180,8 +222,9 @@ class ChildTrack:
 def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
     """
     Runs detection+recognition on a downscaled copy of `frame`, updates each
-    recognized child's track, feeds the state machine, and returns a list of
-    (location_full_res, label, color) to draw on the display frame.
+    recognized child's track, feeds the state machine, queues unmatched/ambiguous
+    events for manual review, and returns a list of (location_full_res, label, color)
+    to draw on the display frame.
     """
     small = cv2.resize(frame, (0, 0), fx=DETECTION_SCALE, fy=DETECTION_SCALE)
     rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
@@ -211,10 +254,33 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
         print(f"[MATCH] confidence={result.confidence:.3f}, child_id={result.child_id}, ambiguous={result.is_ambiguous}")
 
         if result.child_id is None:
+            # Unmatched face - queue for manual review with photo evidence
             draw_items.append(((top, right, bottom, left), "Unknown", (0, 0, 200)))
+            photo_path = save_face_photo(frame, (top, right, bottom, left), "UNMATCHED")
+            db.queue_event(
+                child_id="UNKNOWN",
+                event_type="UNMATCHED_REVIEW",
+                confidence=result.confidence,
+                photo_path=photo_path,
+                gps=None,
+                bus_id=bus_id,
+            )
+            print(f"[REVIEW_QUEUE] Queued UNMATCHED_REVIEW event with confidence {result.confidence:.3f}")
             continue
+        
         if result.is_ambiguous:
+            # Ambiguous face (too close to a different student) - queue for review
             draw_items.append(((top, right, bottom, left), f"{result.child_id}? (review)", (0, 165, 255)))
+            photo_path = save_face_photo(frame, (top, right, bottom, left), "AMBIGUOUS", result.child_id)
+            db.queue_event(
+                child_id=result.child_id,
+                event_type="AMBIGUOUS_REVIEW",
+                confidence=result.confidence,
+                photo_path=photo_path,
+                gps=None,
+                bus_id=bus_id,
+            )
+            print(f"[REVIEW_QUEUE] Queued AMBIGUOUS_REVIEW event for {result.child_id} with confidence {result.confidence:.3f}")
             continue
 
         child_id = result.child_id
@@ -225,11 +291,18 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
         label = student["name"] if student else child_id
         color = (0, 200, 0)
 
+        if student and student.get("assigned_bus_id") not in (None, bus_id):
+            label = f"{label} (other bus)"
+            draw_items.append(((top, right, bottom, left), label, (0, 165, 255)))
+            continue
+
         if student and not track.fired_this_visit:
             direction = track.direction()
             current_status = db.get_status(child_id)
             detection = Detection(child_id, result.confidence, direction, gps=None)
-            outcome = process_detection(detection, leg, student, stop_coords_lookup={})
+            outcome = process_detection(
+                detection, leg, student, stop_coords_lookup={}, bus_id=bus_id
+            )
             
             leg_name = current_leg(leg)
             print(f"\n[STATE_DEBUG] {child_id} ({label})")
@@ -242,10 +315,8 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
                     Outcome.FIRE_DROPPED: "DROPPED",
                     Outcome.FIRE_EXIT_UNEXPECTED: "EXIT_UNEXPECTED_LOCATION",
                 }[outcome]
-                db.queue_event(
-                    child_id=child_id, event_type=event_type, confidence=result.confidence,
-                    photo_path="", gps=None, bus_id=bus_id,
-                )
+                # process_detection persists the event together with its state
+                # transition (or queues unexpected exits) before returning.
                 print(f"  ✓ [EVENT FIRED] {event_type}")
                 label = f"{label}: {event_type}"
                 color = (0, 220, 0)
@@ -254,6 +325,8 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
                 print(f"  ✗ No event - blocked by state machine logic")
 
         draw_items.append(((top, right, bottom, left), label, color))
+
+    return draw_items        draw_items.append(((top, right, bottom, left), label, color))
 
     return draw_items
 
@@ -350,6 +423,8 @@ def main():
         print(f"[INFO] No DISPLAY set - running in headless mode (events still sync to backend)")
 
     tracks: dict[str, ChildTrack] = {}
+    roster = db.load_roster()
+    last_roster_refresh = time.monotonic()
     last_draw_items = []
     frame_count = 0
     process_count = 0  # Track how many times we run detection
@@ -373,7 +448,12 @@ def main():
 
             if frame_count % PROCESS_EVERY_N_FRAMES == 0:
                 process_count += 1
-                roster = db.load_roster()
+                # Keep encodings in memory; loading and JSON-decoding the full
+                # roster for every camera frame stalls recognition on the Pi.
+                # Refresh periodically so completed background syncs take effect.
+                if time.monotonic() - last_roster_refresh >= 30:
+                    roster = db.load_roster()
+                    last_roster_refresh = time.monotonic()
                 if not roster:
                     if process_count % 300 == 0:  # Log only every 300 frames (~10 seconds)
                         print(f"[WARN] Empty roster - no students to match. Did roster sync succeed?")

@@ -37,6 +37,7 @@ class SyncClient:
         ok, failed = 0, 0
         for e in events:
             payload = {
+                "event_uuid": e["event_uuid"],
                 "child_id": e["child_id"],
                 "event_type": e["event_type"],
                 "confidence": e["confidence"],
