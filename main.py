@@ -219,7 +219,7 @@ class ChildTrack:
         return (time.time() - self.last_seen) > TRACK_FORGET_SEC
 
 
-def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords_lookup: dict = None):
+def process_frame(frame, backend, roster, device_code, leg, tracks: dict, stop_coords_lookup: dict = None):
     """
     Runs detection+recognition on a downscaled copy of `frame`, updates each
     recognized child's track, feeds the state machine, queues unmatched/ambiguous
@@ -268,7 +268,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords
                 confidence=result.confidence,
                 photo_path=photo_path,
                 gps=None,
-                bus_id=bus_id,
+                bus_id=device_code,
             )
             print(f"[REVIEW_QUEUE] Queued UNMATCHED_REVIEW event with confidence {result.confidence:.3f}")
             continue
@@ -283,7 +283,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords
                 confidence=result.confidence,
                 photo_path=photo_path,
                 gps=None,
-                bus_id=bus_id,
+                bus_id=device_code,
             )
             print(f"[REVIEW_QUEUE] Queued AMBIGUOUS_REVIEW event for {result.child_id} with confidence {result.confidence:.3f}")
             continue
@@ -296,7 +296,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords
         label = student["name"] if student else child_id
         color = (0, 200, 0)
 
-        if student and student.get("assigned_bus_id") not in (None, bus_id):
+        if student and student.get("assigned_bus_id") not in (None, device_code):
             label = f"{label} (other bus)"
             draw_items.append(((top, right, bottom, left), label, (0, 165, 255)))
             continue
@@ -306,7 +306,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords
             current_status = db.get_status(child_id)
             detection = Detection(child_id, result.confidence, direction, gps=None)
             outcome = process_detection(
-                detection, leg, student, stop_coords_lookup=stop_coords_lookup, bus_id=bus_id
+                detection, leg, student, stop_coords_lookup=stop_coords_lookup, bus_id=device_code
             )
             
             leg_name = current_leg(leg)
@@ -336,14 +336,14 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bus-id", default=os.environ.get("BUS_ID", "bus_14"), help="Bus ID (from .env or CLI)")
+    parser.add_argument("--device-code", default=os.environ.get("DEVICE_CODE", "bus_14"), help="Device code (from .env or CLI)")
     parser.add_argument("--leg", default="auto", choices=["AM", "PM", "auto"], help="Leg (AM/PM/auto)")
     parser.add_argument("--camera-index", type=int, default=0, help="Camera device index")
     parser.add_argument("--backend-url", default=os.environ.get("BACKEND_URL"), help="Backend URL for auto-sync (from .env or CLI)")
     parser.add_argument("--display", type=str, default=None, help="DISPLAY variable (e.g. :0). Auto-detect if not set")
     args = parser.parse_args()
     
-    print(f"[CONFIG] Bus ID: {args.bus_id}")
+    print(f"[CONFIG] Device code: {args.device_code}")
     if args.backend_url:
         print(f"[CONFIG] Backend: {args.backend_url} (sync enabled)")
     else:
@@ -373,7 +373,7 @@ def main():
     # Start background sync if backend URL provided
     sync_client = None
     if args.backend_url:
-        sync_client = SyncClient(args.backend_url, args.bus_id)
+        sync_client = SyncClient(args.backend_url, args.device_code)
         sync_client.start_background(interval=30)
         print(f"[SYNC] Background sync started: {args.backend_url}")
     
@@ -470,7 +470,7 @@ def main():
                     t0 = time.time()
                     # Get current stops from sync client if available for geofencing
                     stops = sync_client.current_stops if sync_client else {}
-                    last_draw_items = process_frame(frame, backend, roster, args.bus_id, this_leg, tracks, stops)
+                    last_draw_items = process_frame(frame, backend, roster, args.device_code, this_leg, tracks, stops)
                     dt = time.time() - t0
                     if dt > 0.5:
                         print(f"[TIMING] recognition pass took {dt:.2f}s")

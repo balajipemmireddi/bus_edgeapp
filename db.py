@@ -114,6 +114,13 @@ def load_roster() -> list[dict]:
         ]
 
 
+def get_roster_count() -> int:
+    """Get current roster size for safety checks."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM roster").fetchone()
+        return row["cnt"] if row else 0
+
+
 def replace_roster(students: list[dict]):
     """Nightly sync overwrites the whole roster (§6 step 5)."""
     with get_conn() as conn:
