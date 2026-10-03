@@ -79,6 +79,45 @@ class SyncClient:
             print(f"[SYNC] unexpected error fetching roster: {type(ex).__name__}: {ex}")
             return False
     
+    def pull_deletions(self):
+        """
+        Fetch pending student deletions from backend and process them.
+        Also sends acknowledgments back for successful deletions.
+        """
+        try:
+            url = f"{self.backend_url}/api/deletion-queue"
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            deletions = data.get("deletions", [])
+            
+            if not deletions:
+                return  # No pending deletions
+            
+            print(f"[SYNC] Processing {len(deletions)} pending student deletions")
+            
+            for deletion in deletions:
+                deletion_uuid = deletion["deletion_uuid"]
+                child_id = deletion["child_id"]
+                student_name = deletion["student_name"]
+                
+                try:
+                    # Process the deletion (removes from local roster)
+                    db.process_deletion(deletion_uuid, child_id)
+                    print(f"[SYNC] ✓ Deleted '{student_name}' ({child_id}) - removed from local roster")
+                    
+                    # Acknowledge to backend that we've processed it
+                    ack_url = f"{self.backend_url}/api/deletion-queue/{deletion_uuid}/ack"
+                    requests.post(ack_url, params={"bus_id": self.bus_id}, timeout=5)
+                    print(f"[SYNC] Acknowledged deletion of {child_id} to backend")
+                except Exception as ex:
+                    print(f"[SYNC] Failed to process deletion of {child_id}: {ex}")
+                    
+        except requests.exceptions.RequestException as ex:
+            print(f"[SYNC] deletion queue pull failed: {type(ex).__name__}: {ex}")
+        except Exception as ex:
+            print(f"[SYNC] unexpected error fetching deletions: {type(ex).__name__}: {ex}")
+    
     def pull_stops(self) -> dict:
         """
         Fetch stop coordinates for geofence validation.
@@ -118,11 +157,12 @@ class SyncClient:
             return False
     
     def one_pass(self):
-        """Single sync iteration: heartbeat → events → roster → stops."""
+        """Single sync iteration: heartbeat → events → deletions → roster → stops."""
         self.send_heartbeat()
         ok, failed = self.push_queued_events()
         if ok or failed:
             print(f"[SYNC] events: {ok} pushed, {failed} queued")
+        self.pull_deletions()  # Process any student deletions from backend
         self.pull_roster()
         self.pull_stops()
     

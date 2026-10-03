@@ -74,6 +74,15 @@ def init_db():
                 timestamp TEXT NOT NULL,
                 synced INTEGER DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS deletion_sync_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                deletion_uuid TEXT UNIQUE NOT NULL,
+                child_id TEXT NOT NULL,
+                student_name TEXT,
+                processed INTEGER DEFAULT 0,
+                processed_at TEXT
+            );
             """
         )
         # Upgrade databases created before event UUIDs were introduced.
@@ -236,3 +245,51 @@ def reset_new_school_day(date: str | None = None):
         ).fetchone()
         if existing["c"] == 0:
             pass  # rows are created lazily by set_status/mark_absent_today as events occur
+
+
+def queue_deletion(deletion_uuid: str, child_id: str, student_name: str):
+    """Queue a student deletion to be processed during sync."""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO deletion_sync_queue 
+               (deletion_uuid, child_id, student_name, processed)
+               VALUES (?, ?, ?, 0)""",
+            (deletion_uuid, child_id, student_name)
+        )
+
+
+def get_pending_deletions() -> list[dict]:
+    """Get all deletions waiting to be processed."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM deletion_sync_queue WHERE processed=0 ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def process_deletion(deletion_uuid: str, child_id: str):
+    """
+    Delete a student from local roster when deletion is synced.
+    Removes all face encodings and student data.
+    """
+    with get_conn() as conn:
+        # Delete from roster
+        conn.execute("DELETE FROM roster WHERE child_id=?", (child_id,))
+        
+        # Delete from daily_state to clear any pickup/drop history for this student
+        conn.execute("DELETE FROM daily_state WHERE child_id=?", (child_id,))
+        
+        # Mark deletion as processed
+        conn.execute(
+            "UPDATE deletion_sync_queue SET processed=1, processed_at=? WHERE deletion_uuid=?",
+            (datetime.datetime.now(datetime.timezone.utc).isoformat(), deletion_uuid)
+        )
+
+
+def get_processed_deletion_uuids() -> list[str]:
+    """Get list of deletion UUIDs that this Pi has already processed, for ACK to backend."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT deletion_uuid FROM deletion_sync_queue WHERE processed=1"
+        ).fetchall()
+        return [r["deletion_uuid"] for r in rows]
