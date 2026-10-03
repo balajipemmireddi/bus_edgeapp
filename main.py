@@ -331,8 +331,6 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords
 
         draw_items.append(((top, right, bottom, left), label, color))
 
-    return draw_items        draw_items.append(((top, right, bottom, left), label, color))
-
     return draw_items
 
 
