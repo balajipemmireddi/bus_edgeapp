@@ -219,13 +219,18 @@ class ChildTrack:
         return (time.time() - self.last_seen) > TRACK_FORGET_SEC
 
 
-def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
+def process_frame(frame, backend, roster, bus_id, leg, tracks: dict, stop_coords_lookup: dict = None):
     """
     Runs detection+recognition on a downscaled copy of `frame`, updates each
     recognized child's track, feeds the state machine, queues unmatched/ambiguous
     events for manual review, and returns a list of (location_full_res, label, color)
     to draw on the display frame.
+    
+    stop_coords_lookup: dict mapping stop_id -> (lat, lng) for geofence validation.
     """
+    if stop_coords_lookup is None:
+        stop_coords_lookup = {}
+    
     small = cv2.resize(frame, (0, 0), fx=DETECTION_SCALE, fy=DETECTION_SCALE)
     rgb_small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
 
@@ -301,7 +306,7 @@ def process_frame(frame, backend, roster, bus_id, leg, tracks: dict):
             current_status = db.get_status(child_id)
             detection = Detection(child_id, result.confidence, direction, gps=None)
             outcome = process_detection(
-                detection, leg, student, stop_coords_lookup={}, bus_id=bus_id
+                detection, leg, student, stop_coords_lookup=stop_coords_lookup, bus_id=bus_id
             )
             
             leg_name = current_leg(leg)
@@ -465,7 +470,9 @@ def main():
                               f"not a real new leg, re-run with --leg AM or --leg PM to pin it)")
                         last_logged_leg = this_leg
                     t0 = time.time()
-                    last_draw_items = process_frame(frame, backend, roster, args.bus_id, this_leg, tracks)
+                    # Get current stops from sync client if available for geofencing
+                    stops = sync_client.current_stops if sync_client else {}
+                    last_draw_items = process_frame(frame, backend, roster, args.bus_id, this_leg, tracks, stops)
                     dt = time.time() - t0
                     if dt > 0.5:
                         print(f"[TIMING] recognition pass took {dt:.2f}s")

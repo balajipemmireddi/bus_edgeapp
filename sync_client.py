@@ -30,6 +30,7 @@ class SyncClient:
         self.backend_url = backend_url.rstrip("/")
         self.bus_id = bus_id
         self.running = False
+        self.current_stops = {}  # Map stop_id -> (lat, lng)
     
     def push_queued_events(self) -> tuple[int, int]:
         """Returns (succeeded, failed) counts."""
@@ -78,6 +79,30 @@ class SyncClient:
             print(f"[SYNC] unexpected error fetching roster: {type(ex).__name__}: {ex}")
             return False
     
+    def pull_stops(self) -> dict:
+        """
+        Fetch stop coordinates for geofence validation.
+        Returns dict mapping stop_id -> (lat, lng) for state machine.
+        Updates self.current_stops so main.py can access it.
+        """
+        try:
+            url = f"{self.backend_url}/api/stops"
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            stops = resp.json()
+            result = {}
+            for stop in stops:
+                result[stop["stop_id"]] = (stop["latitude"], stop["longitude"])
+            self.current_stops = result
+            print(f"[SYNC] stops updated: {len(result)} stops with coordinates")
+            return result
+        except requests.exceptions.RequestException as ex:
+            print(f"[SYNC] stops pull failed: {type(ex).__name__}: {ex} - geofence disabled")
+            return {}
+        except Exception as ex:
+            print(f"[SYNC] unexpected error fetching stops: {type(ex).__name__}: {ex}")
+            return {}
+    
     def send_heartbeat(self) -> bool:
         try:
             url = f"{self.backend_url}/api/devices/{self.bus_id}/heartbeat"
@@ -93,12 +118,13 @@ class SyncClient:
             return False
     
     def one_pass(self):
-        """Single sync iteration: heartbeat → events → roster."""
+        """Single sync iteration: heartbeat → events → roster → stops."""
         self.send_heartbeat()
         ok, failed = self.push_queued_events()
         if ok or failed:
             print(f"[SYNC] events: {ok} pushed, {failed} queued")
         self.pull_roster()
+        self.pull_stops()
     
     def run_loop(self, interval: int = 30):
         """Run continuous sync loop."""
